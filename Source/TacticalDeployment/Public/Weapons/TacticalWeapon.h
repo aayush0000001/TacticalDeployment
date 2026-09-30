@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Weapons/WeaponStats.h"
+#include "Weapons/ShotRules.h"
 #include "Engine/NetSerialization.h"
 #include "TacticalWeapon.generated.h"
 
@@ -87,8 +88,8 @@ protected:
 	/** Local fire loop tick (owning client). */
 	void LocalFireShot();
 
-	/** Server: validate + resolve one shot. */
-	void ServerResolveShot(double ViewTime, const FVector& Start, const FVector& AimDirection);
+	/** Server: resolve one validated shot. ViewTime drives the rewind, CadenceTime the spray. */
+	void ServerResolveShot(double ViewTime, double CadenceTime, const FVector& Start, const FVector& AimDirection);
 
 	/** Server: walk the bullet through surfaces, lag-compensated. Returns the final impact point. */
 	FVector TraceWithPenetration(const FScopedLagCompensation& Rewind, const FVector& Start, const FVector& Direction);
@@ -143,7 +144,7 @@ protected:
 
 	FWeaponSprayState ServerSpray;
 	FRandomStream ServerSpreadStream; // Seeded with a server secret: spread is not predictable client-side.
-	double LastServerClientViewTime = -1.0;
+	ShotRules::FFireCadenceGate ServerCadence;
 	double ServerEquipCompleteTime = 0.0;
 	bool bServerReloading = false;
 	FTimerHandle ServerReloadTimer;

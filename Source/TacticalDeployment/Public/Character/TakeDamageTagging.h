@@ -57,6 +57,20 @@ struct FTaggingState
 		const float Recovery = FMath::SmoothStep(0.f, Duration, Elapsed);
 		return 1.f - GetSlow() * (1.f - Recovery);
 	}
+
+	/**
+	 * A new hit at Now (move clock). Stacking never weakens an active tag: the new slow is the
+	 * larger of the hit's slow and what the current tag still applies; the ease-out restarts.
+	 */
+	static FTaggingState Stack(const FTaggingState& Current, float Now, float SlowFraction, float Duration)
+	{
+		const float RemainingSlow = 1.f - Current.Evaluate(Now);
+		FTaggingState Next;
+		Next.StartMoveTime = Now;
+		Next.Duration = Duration;
+		Next.SetSlow(FMath::Max(SlowFraction, RemainingSlow));
+		return Next;
+	}
 };
 
 UINTERFACE(MinimalAPI, meta = (CannotImplementInterfaceInBlueprint))

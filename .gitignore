@@ -12,3 +12,6 @@ Saved/
 *.VC.db
 *.opensdf
 *.sdf
+
+# Simulation harness build output
+Tools/Simulation/Build/

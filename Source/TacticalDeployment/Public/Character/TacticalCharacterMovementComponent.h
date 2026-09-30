@@ -13,8 +13,8 @@
  *
  *  - Snappy: high acceleration + high ground friction = counter-strafing kills velocity in a
  *    handful of 128 Hz ticks, while simply releasing a key brakes noticeably slower.
- *  - Deterministic: fixed 7.8125 ms sub-steps, so a 60 FPS and a 360 FPS client integrate the
- *    same trajectory and the server replays both identically.
+ *  - Deterministic: sub-steps capped at 7.8125 ms keep 60 FPS and 360 FPS clients within a few
+ *    centimetres of each other, and the server replays each client's exact steps.
  *  - Predicted intents: shift-walk and the plant/defuse lock ride in the compressed move flags,
  *    so the server applies them on exactly the same moves the client did (no corrections).
  *  - Tagging: bullet hits scale max speed through FTaggingState, evaluated on the move clock.

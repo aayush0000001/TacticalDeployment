@@ -1,6 +1,7 @@
 // Copyright TacticalDeployment. All Rights Reserved.
 
 #include "Character/TacticalCharacterMovementComponent.h"
+#include "Character/TacticalMovementTuning.h"
 #include "Character/TacticalCharacter.h"
 #include "Game/TacticalGameState.h"
 #include "Core/TacticalTypes.h"
@@ -11,29 +12,22 @@ UTacticalCharacterMovementComponent::UTacticalCharacterMovementComponent()
 	, bWantsInteractLock(false)
 	, bInMoveAutonomous(false)
 {
-	// --- Speeds (cm/s) ----------------------------------------------------------------
-	MaxWalkSpeed = 675.f;           // Run.
-	MaxShiftWalkSpeed = 405.f;      // Silent walk (60%).
-	MaxWalkSpeedCrouched = 230.f;
-
-	// --- Snappy ground model ----------------------------------------------------------
-	// With input opposing velocity, CalcVelocity bends velocity toward the input direction at
-	// rate GroundFriction, then adds MaxAcceleration. At 128 Hz this removes ~19% of velocity per
-	// tick from friction alone, so a counter-strafe drops below the weapon's accuracy threshold
-	// (30% of run speed) in ~45 ms. Releasing the key only applies braking: ~200 ms. That gap is
-	// the skill expression.
-	MaxAcceleration = 5200.f;
-	GroundFriction = 12.f;
-	BrakingDecelerationWalking = 3400.f;
+	// --- Speeds and the snappy ground model (see TacticalMovementTuning.h) ------------
+	MaxWalkSpeed = TacticalMovementTuning::RunSpeed;
+	MaxShiftWalkSpeed = TacticalMovementTuning::ShiftWalkSpeed;
+	MaxWalkSpeedCrouched = TacticalMovementTuning::CrouchSpeed;
+	MaxAcceleration = TacticalMovementTuning::MaxAcceleration;
+	GroundFriction = TacticalMovementTuning::GroundFriction;
+	BrakingDecelerationWalking = TacticalMovementTuning::BrakingDeceleration;
 	bUseSeparateBrakingFriction = true;
-	BrakingFriction = 4.f;
-	BrakingFrictionFactor = 1.f;
-	BrakingSubStepTime = 1.f / 128.f;
+	BrakingFriction = TacticalMovementTuning::BrakingFriction;
+	BrakingFrictionFactor = TacticalMovementTuning::BrakingFrictionFactor;
+	BrakingSubStepTime = TacticalMovementTuning::BrakingSubStepTime;
 
 	// --- Air ----------------------------------------------------------------------------
-	JumpZVelocity = 440.f;
-	GravityScale = 1.25f;
-	AirControl = 0.25f;
+	JumpZVelocity = TacticalMovementTuning::JumpZVelocity;
+	GravityScale = TacticalMovementTuning::GravityScale;
+	AirControl = TacticalMovementTuning::AirControl;
 	BrakingDecelerationFalling = 0.f;
 	FallingLateralFriction = 0.f;
 
@@ -43,7 +37,8 @@ UTacticalCharacterMovementComponent::UTacticalCharacterMovementComponent()
 	SetCrouchedHalfHeight(60.f);
 
 	// --- Determinism --------------------------------------------------------------------
-	// Sub-step at exactly one server frame so every client framerate integrates identically.
+	// Cap sub-steps at one server frame: bounds how far different client frame rates can drift
+	// apart (the server always replays each client's exact steps, so it never disagrees).
 	MaxSimulationTimeStep = TacticalNet::ServerFrameTime;
 	MaxSimulationIterations = 16;
 	MaxJumpApexAttemptsPerSimulation = 2;
@@ -66,29 +61,18 @@ UTacticalCharacterMovementComponent::UTacticalCharacterMovementComponent()
 
 float UTacticalCharacterMovementComponent::GetMaxSpeed() const
 {
-	if (IsMovementPhaseLocked())
-	{
-		return 0.f;
-	}
+	const ATacticalCharacter* TacticalOwner = Cast<ATacticalCharacter>(CharacterOwner);
 
-	const bool bOnGround = IsMovingOnGround();
-	if (bWantsInteractLock && bOnGround)
-	{
-		return 0.f;
-	}
-
-	float Speed = Super::GetMaxSpeed(); // Handles crouch / swim / fly.
-	if (bOnGround && bWantsToShiftWalk && !IsCrouching())
-	{
-		Speed = FMath::Min(Speed, MaxShiftWalkSpeed);
-	}
-
-	if (const ATacticalCharacter* TacticalOwner = Cast<ATacticalCharacter>(CharacterOwner))
-	{
-		Speed *= TacticalOwner->GetEquippedMovementMultiplier();
-	}
-
-	return Speed * GetTaggingSpeedScalar();
+	TacticalMovementTuning::FMaxSpeedInputs Inputs;
+	Inputs.BaseMaxSpeed = Super::GetMaxSpeed(); // Handles crouch / swim / fly.
+	Inputs.bOnGround = IsMovingOnGround();
+	Inputs.bCrouching = IsCrouching();
+	Inputs.bWantsShiftWalk = bWantsToShiftWalk;
+	Inputs.bInteractLocked = bWantsInteractLock;
+	Inputs.bPhaseLocked = IsMovementPhaseLocked();
+	Inputs.WeaponMultiplier = TacticalOwner ? TacticalOwner->GetEquippedMovementMultiplier() : 1.f;
+	Inputs.TaggingScalar = GetTaggingSpeedScalar();
+	return TacticalMovementTuning::ComputeMaxSpeed(Inputs);
 }
 
 bool UTacticalCharacterMovementComponent::CanAttemptJump() const
@@ -164,14 +148,7 @@ const FTaggingState& UTacticalCharacterMovementComponent::ServerApplyTag(const F
 		? static_cast<float>(GetWorld()->GetTimeSeconds())
 		: GetServerMoveClockNow();
 
-	// Stacking: never weaken an active tag; a fresh hit restarts the ease-out.
-	const float RemainingSlow = 1.f - TaggingState.Evaluate(Now);
-
-	FTaggingState NewState;
-	NewState.StartMoveTime = Now;
-	NewState.Duration = Params.Duration;
-	NewState.SetSlow(FMath::Max(Params.SlowFraction, RemainingSlow));
-	TaggingState = NewState;
+	TaggingState = FTaggingState::Stack(TaggingState, Now, Params.SlowFraction, Params.Duration);
 	return TaggingState;
 }
 

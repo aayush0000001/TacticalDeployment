@@ -155,7 +155,7 @@ FVector UWeaponStats::ApplyRecoilAndSpread(const FRotator& AimRotation, const FV
 {
 	FRotator Punched = AimRotation;
 	Punched.Yaw += RecoilDegrees.X;
-	Punched.Pitch = FMath::ClampAngle(Punched.Pitch + RecoilDegrees.Y, -89.f, 89.f);
+	Punched.Pitch = FMath::ClampAngle(Punched.Pitch + RecoilDegrees.Y, -89.0, 89.0);
 
 	const FVector Forward = Punched.Vector();
 	if (SpreadHalfAngleDegrees <= KINDA_SMALL_NUMBER)

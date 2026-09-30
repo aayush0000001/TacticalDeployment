@@ -1,6 +1,7 @@
 // Copyright TacticalDeployment. All Rights Reserved.
 
 #include "Net/FogOfWarSubsystem.h"
+#include "Net/FogOfWarRules.h"
 #include "Character/TacticalCharacter.h"
 #include "Components/CapsuleComponent.h"
 #include "Core/TacticalTypes.h"
@@ -164,42 +165,20 @@ const ATacticalCharacter* UTacticalFogOfWarSubsystem::ResolveViewerCharacter(con
 
 bool UTacticalFogOfWarSubsystem::ComputeRelevancy(const ATacticalCharacter* ViewerCharacter, int32 ViewerSlot, const ATacticalCharacter* Target, int32 TargetSlot, double Now) const
 {
-	if (!Target->IsAlive())
-	{
-		return true; // Corpses carry no tactical information.
-	}
-	if (!ViewerCharacter)
-	{
-		return false; // Dead with nobody to spectate: no eyes, nothing to see.
-	}
-	if (ViewerCharacter->GetTeam() == Target->GetTeam())
-	{
-		return true;
-	}
-
 	const UTacticalFogOfWarSettings* Settings = GetDefault<UTacticalFogOfWarSettings>();
 
-	// Seen recently (async LOS results, with hysteresis).
-	if (ViewerSlot != INDEX_NONE && TargetSlot != INDEX_NONE)
-	{
-		const FPairState& Pair = Pairs[ViewerSlot * MaxSlots + TargetSlot];
-		if (Now - Pair.LastVisibleTime <= Settings->VisibilityGraceTime)
-		{
-			return true;
-		}
-	}
-
-	// Heard: the client needs the actor to spatialize footsteps/gunfire correctly.
-	if (Now - Target->GetLastNoiseTime() <= Settings->NoiseMemoryTime)
-	{
-		const double DistSq = FVector::DistSquared(ViewerCharacter->GetActorLocation(), Target->GetActorLocation());
-		if (DistSq <= FMath::Square(static_cast<double>(Target->GetLastNoiseRadius())))
-		{
-			return true;
-		}
-	}
-
-	return false;
+	FogOfWarRules::FRelevancyInputs Inputs;
+	Inputs.bTargetAlive = Target->IsAlive();
+	Inputs.bHasViewer = ViewerCharacter != nullptr;
+	Inputs.bSameTeam = ViewerCharacter && ViewerCharacter->GetTeam() == Target->GetTeam();
+	Inputs.Now = Now;
+	Inputs.LastVisibleTime = (ViewerSlot != INDEX_NONE && TargetSlot != INDEX_NONE) ? Pairs[ViewerSlot * MaxSlots + TargetSlot].LastVisibleTime : -1.0e9;
+	Inputs.LastNoiseTime = Target->GetLastNoiseTime();
+	Inputs.LastNoiseRadius = Target->GetLastNoiseRadius();
+	Inputs.ViewerToTargetDistSq = ViewerCharacter ? FVector::DistSquared(ViewerCharacter->GetActorLocation(), Target->GetActorLocation()) : 0.0;
+	Inputs.VisibilityGraceTime = Settings->VisibilityGraceTime;
+	Inputs.NoiseMemoryTime = Settings->NoiseMemoryTime;
+	return FogOfWarRules::IsRelevant(Inputs);
 }
 
 bool UTacticalFogOfWarSubsystem::IsRelevantTo(const APlayerController* Viewer, const ATacticalCharacter* Target) const
@@ -223,13 +202,12 @@ bool UTacticalFogOfWarSubsystem::IsRelevantTo(const APlayerController* Viewer, c
 // Async LOS
 // ---------------------------------------------------------------------------------------
 
-float UTacticalFogOfWarSubsystem::GetRevealLookahead(const ATacticalCharacter* Viewer) const
+FogOfWarRules::FRevealLookahead UTacticalFogOfWarSubsystem::GetRevealLookahead(const ATacticalCharacter* Viewer) const
 {
 	const UTacticalFogOfWarSettings* Settings = GetDefault<UTacticalFogOfWarSettings>();
 	const APlayerState* PS = Viewer->GetPlayerState();
-	const float OneWay = PS ? PS->GetPingInMilliseconds() * 0.0005f : 0.f;
-	const float StrideTime = Settings->EvaluationStride * TacticalNet::ServerFrameTime;
-	return FMath::Min(OneWay + StrideTime, Settings->MaxRevealLookahead);
+	const float RoundTrip = PS ? PS->GetPingInMilliseconds() * 0.001f : 0.f;
+	return FogOfWarRules::ComputeRevealLookahead(RoundTrip, Settings->EvaluationStride, TacticalNet::ServerFrameTime, Settings->MaxRevealLookahead);
 }
 
 void UTacticalFogOfWarSubsystem::DispatchTraces(double Now)
@@ -251,8 +229,8 @@ void UTacticalFogOfWarSubsystem::DispatchTraces(double Now)
 			continue;
 		}
 
-		const float Lookahead = GetRevealLookahead(Viewer);
-		const FVector Eye = Viewer->GetPawnViewLocation() + Viewer->GetVelocity() * Lookahead;
+		const FogOfWarRules::FRevealLookahead Lookahead = GetRevealLookahead(Viewer);
+		const FVector Eye = Viewer->GetPawnViewLocation() + Viewer->GetVelocity() * Lookahead.Viewer;
 
 		for (int32 TargetSlot = 0; TargetSlot < MaxSlots; ++TargetSlot)
 		{
@@ -265,7 +243,7 @@ void UTacticalFogOfWarSubsystem::DispatchTraces(double Now)
 			const int32 PairIndex = ViewerSlot * MaxSlots + TargetSlot;
 			FPairState& Pair = Pairs[PairIndex];
 			// Stagger pairs across frames; never stack batches on a pair still awaiting results.
-			if (((PairIndex + FrameCounter) % Stride) != 0 || Pair.PendingTraces > 0)
+			if (!FogOfWarRules::ShouldEvaluatePair(PairIndex, FrameCounter, Stride) || Pair.PendingTraces > 0)
 			{
 				continue;
 			}
@@ -274,21 +252,11 @@ void UTacticalFogOfWarSubsystem::DispatchTraces(double Now)
 			const UCapsuleComponent* Capsule = Target->GetCapsuleComponent();
 			const float HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
 			const float Radius = Capsule->GetScaledCapsuleRadius() * Settings->SilhouetteExpansion;
-			const FVector Center = Target->GetActorLocation() + Target->GetVelocity() * Lookahead;
-			const FVector ToTarget = (Center - Eye).GetSafeNormal2D();
-			const FVector Side = FVector::CrossProduct(ToTarget, FVector::UpVector) * Radius;
-			const FVector Chest = Center + FVector(0.f, 0.f, HalfHeight * 0.35f);
+			const FVector Center = Target->GetActorLocation() + Target->GetVelocity() * Lookahead.Target;
+			FVector Samples[FogOfWarRules::NumSamplePoints];
+			FogOfWarRules::BuildSamplePoints(Eye, Center, HalfHeight, Radius, Samples);
 
-			const FVector Samples[NumSamplePoints] =
-			{
-				Center + FVector(0.f, 0.f, HalfHeight - 8.f), // Head
-				Chest,
-				Chest + Side,                                  // Shoulders: first thing to clear a corner
-				Chest - Side,
-				Center - FVector(0.f, 0.f, HalfHeight - 12.f), // Feet (visible under boxes/doors)
-			};
-
-			Pair.PendingTraces = NumSamplePoints;
+			Pair.PendingTraces = FogOfWarRules::NumSamplePoints;
 			Pair.DispatchTime = Now;
 			const uint32 UserData = FogOfWar::PackUserData(PairIndex, Pair.Generation);
 			for (const FVector& Sample : Samples)

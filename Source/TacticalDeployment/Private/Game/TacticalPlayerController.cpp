@@ -43,49 +43,23 @@ void ATacticalPlayerController::Server_RequestTimeSync_Implementation(double Cli
 
 void ATacticalPlayerController::Client_ReportTimeSync_Implementation(double ClientSendTime, double ServerTime)
 {
-	const double Now = GetWorld()->GetTimeSeconds();
-	const double RoundTrip = Now - ClientSendTime;
-	if (RoundTrip < 0.0 || RoundTrip > 2.0)
-	{
-		return; // Stale or bogus probe.
-	}
-
-	// The server stamped ServerTime ~RTT/2 before we received it.
-	FClockSample& Sample = ClockSamples[NextSampleIndex];
-	Sample.RoundTrip = RoundTrip;
-	Sample.Offset = (ServerTime + RoundTrip * 0.5) - Now;
-	NextSampleIndex = (NextSampleIndex + 1) % NumClockSamples;
-	NumValidSamples = FMath::Min(NumValidSamples + 1, NumClockSamples);
-
-	int32 Best = 0;
-	for (int32 i = 1; i < NumValidSamples; ++i)
-	{
-		if (ClockSamples[i].RoundTrip < ClockSamples[Best].RoundTrip)
-		{
-			Best = i;
-		}
-	}
-
-	// Slew instead of stepping so the stamped view time never jumps backwards mid-spray.
-	const double TargetOffset = ClockSamples[Best].Offset;
-	ServerTimeOffset = bHasTimeSync ? FMath::Lerp(ServerTimeOffset, TargetOffset, 0.25) : TargetOffset;
-	SmoothedRoundTrip = bHasTimeSync ? FMath::Lerp(SmoothedRoundTrip, static_cast<float>(RoundTrip), 0.2f) : static_cast<float>(RoundTrip);
-	bHasTimeSync = true;
+	ClockSync.AddSample(ClientSendTime, ServerTime, GetWorld()->GetTimeSeconds());
 }
 
 double ATacticalPlayerController::GetEstimatedServerTime() const
 {
 	const double Now = GetWorld()->GetTimeSeconds();
-	return HasAuthority() ? Now : Now + ServerTimeOffset;
+	return HasAuthority() ? Now : ClockSync.EstimateServerTime(Now);
 }
 
 double ATacticalPlayerController::GetClientViewTime() const
 {
+	const double Now = GetWorld()->GetTimeSeconds();
 	if (HasAuthority())
 	{
-		return GetWorld()->GetTimeSeconds(); // Listen host / standalone: no latency to undo.
+		return Now; // Listen host / standalone: no latency to undo.
 	}
-	return GetEstimatedServerTime() - SmoothedRoundTrip * 0.5 - TacticalNet::ProxyInterpolationDelay;
+	return ClockSync.EstimateViewTime(Now, TacticalNet::ProxyInterpolationDelay);
 }
 
 // ---------------------------------------------------------------------------------------

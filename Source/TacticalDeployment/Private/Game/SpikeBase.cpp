@@ -3,6 +3,7 @@
 #include "Game/SpikeBase.h"
 #include "Character/TacticalCharacter.h"
 #include "Character/TacticalCharacterMovementComponent.h"
+#include "Game/RoundRules.h"
 #include "Game/TacticalGameMode.h"
 #include "Game/TacticalGameState.h"
 #include "Net/FogOfWarSubsystem.h"
@@ -222,11 +223,8 @@ bool ASpikeBase::ServerTryBeginInteract(ATacticalCharacter* Character)
 
 void ASpikeBase::ServerBeginPlant(ATacticalCharacter* Planter)
 {
-	Interaction.Type = ESpikeInteraction::Planting;
+	Interaction = SpikeRules::MakePlant(SpikeHelpers::GetServerNow(GetWorld()), PlantDuration);
 	Interaction.Interactor = Planter;
-	Interaction.StartServerTime = SpikeHelpers::GetServerNow(GetWorld());
-	Interaction.Duration = PlantDuration;
-	Interaction.StartProgress = 0.f; // Plant progress is never banked.
 	InteractionAnchor = Planter->GetActorLocation();
 	SetActorTickEnabled(true);
 }
@@ -234,11 +232,8 @@ void ASpikeBase::ServerBeginPlant(ATacticalCharacter* Planter)
 void ASpikeBase::ServerBeginDefuse(ATacticalCharacter* Defuser)
 {
 	// Resume from the checkpoint: with 50% banked, 7 s becomes 3.5 s.
-	Interaction.Type = ESpikeInteraction::Defusing;
+	Interaction = SpikeRules::MakeDefuse(SpikeHelpers::GetServerNow(GetWorld()), DefuseDuration, DefuseCheckpoint);
 	Interaction.Interactor = Defuser;
-	Interaction.StartServerTime = SpikeHelpers::GetServerNow(GetWorld());
-	Interaction.StartProgress = DefuseCheckpoint;
-	Interaction.Duration = DefuseDuration * (1.f - DefuseCheckpoint);
 	InteractionAnchor = Defuser->GetActorLocation();
 	SetActorTickEnabled(true);
 }
@@ -253,14 +248,10 @@ void ASpikeBase::ServerEndInteract(ATacticalCharacter* Character)
 
 void ASpikeBase::ServerStopInteraction(bool bBankCheckpoint)
 {
-	if (Interaction.Type == ESpikeInteraction::Defusing && bBankCheckpoint)
+	if (bBankCheckpoint)
 	{
 		// The 50% checkpoint: reaching 3.5 s of a 7 s defuse banks half, permanently for this plant.
-		const float Progress = Interaction.GetProgress(SpikeHelpers::GetServerNow(GetWorld()));
-		if (Progress >= DefuseCheckpointFraction)
-		{
-			DefuseCheckpoint = FMath::Max(DefuseCheckpoint, DefuseCheckpointFraction);
-		}
+		DefuseCheckpoint = SpikeRules::BankDefuseCheckpoint(Interaction, SpikeHelpers::GetServerNow(GetWorld()), DefuseCheckpoint, DefuseCheckpointFraction);
 	}
 
 	ATacticalCharacter* FormerInteractor = Interaction.Interactor;
@@ -302,29 +293,17 @@ void ASpikeBase::Tick(float DeltaSeconds)
 
 	const double Now = SpikeHelpers::GetServerNow(GetWorld());
 
-	if (Interaction.Type != ESpikeInteraction::None)
+	if (Interaction.Type != ESpikeInteraction::None && IsInterruptionRequired(Now))
 	{
-		if (IsInterruptionRequired(Now))
-		{
-			ServerStopInteraction(/*bBankCheckpoint*/ true);
-		}
-		else if (Interaction.Type == ESpikeInteraction::Planting && Now >= Interaction.GetCompletionTime())
-		{
-			ServerCompletePlant();
-			return;
-		}
-		// Defuse vs. detonation: whichever *timestamp* is earlier wins, regardless of frame order.
-		else if (Interaction.Type == ESpikeInteraction::Defusing && Now >= Interaction.GetCompletionTime()
-			&& Interaction.GetCompletionTime() <= DetonationServerTime)
-		{
-			ServerCompleteDefuse();
-			return;
-		}
+		ServerStopInteraction(/*bBankCheckpoint*/ true);
 	}
 
-	if (State == ESpikeState::Planted && Now >= DetonationServerTime)
+	switch (SpikeRules::Evaluate(Interaction, State == ESpikeState::Planted, DetonationServerTime, Now))
 	{
-		ServerDetonate();
+	case SpikeRules::ETickOutcome::PlantComplete:  ServerCompletePlant();  break;
+	case SpikeRules::ETickOutcome::DefuseComplete: ServerCompleteDefuse(); break;
+	case SpikeRules::ETickOutcome::Detonate:       ServerDetonate();       break;
+	default: break;
 	}
 }
 
@@ -497,8 +476,5 @@ void ATacticalSpawnBarrier::BindToGameState(AGameStateBase* GameStateBase)
 
 void ATacticalSpawnBarrier::ApplyPhase(ETacticalMatchPhase Phase)
 {
-	const bool bBlocking = Phase == ETacticalMatchPhase::PreMatch
-		|| Phase == ETacticalMatchPhase::BuyPhase
-		|| Phase == ETacticalMatchPhase::BarrierPhase;
-	Barrier->SetCollisionEnabled(bBlocking ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+	Barrier->SetCollisionEnabled(RoundRules::AreBarriersUp(Phase) ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
 }

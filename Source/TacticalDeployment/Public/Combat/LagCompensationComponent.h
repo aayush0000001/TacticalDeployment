@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Core/TacticalTypes.h"
+#include "Combat/HitboxRewind.h"
 #include "LagCompensationComponent.generated.h"
 
 class ATacticalCharacter;
@@ -37,42 +38,6 @@ struct FHitboxDefinition
 
 	UPROPERTY(EditDefaultsOnly, Category = "Hitbox")
 	FRotator LocalRotation = FRotator::ZeroRotator;
-};
-
-namespace LagCompensation
-{
-	inline constexpr int32 MaxTrackedCharacters = 12;    // 10 players + reconnect slack.
-	inline constexpr int32 MaxHitboxesPerCharacter = 16; // Head, neck, 3 spine, 2x(upper/lower arm), pelvis, 2x(thigh/calf/foot).
-	inline constexpr float HistorySeconds = 1.f;
-	/** 1000 ms at 128 Hz = 128 frames, plus slack so a hitch never evicts the frame we need. */
-	inline constexpr int32 HistoryCapacity = 136;
-}
-
-/** One hitbox in world space at one server frame (28 bytes; float precision is ample inside a tactical map). */
-struct FHitboxSnapshot
-{
-	FVector3f Center;
-	FQuat4f Rotation; // Capsule axis is local Z.
-};
-
-/** One character's hitbox set at one server frame. */
-struct FCharacterPoseRecord
-{
-	FVector3f BoundsCenter;       // Broad-phase sphere.
-	float BoundsRadius;
-	uint8 NumHitboxes;
-	bool bValid;                  // Slot occupied, alive and recorded this frame.
-	FHitboxSnapshot Hitboxes[LagCompensation::MaxHitboxesPerCharacter];
-};
-
-/**
- * The rewind unit: every tracked character's hitboxes at one server frame, stamped with
- * server time. POD, fixed-size, lives in a pre-allocated ring buffer: zero allocations per tick.
- */
-struct FFrameRecord
-{
-	double ServerTime;
-	FCharacterPoseRecord Characters[LagCompensation::MaxTrackedCharacters];
 };
 
 /** Result of a hitscan against rewound hitboxes. */
@@ -144,18 +109,13 @@ private:
 	void RecordCharacter(FTrackedSlot& Slot, FCharacterPoseRecord& Out) const;
 	void ResolveBoneIndices(FTrackedSlot& Slot) const;
 
-	/** Logical index 0 = oldest recorded frame. */
-	const FFrameRecord& GetFrame(int32 LogicalIndex) const;
-
 	/** Builds RewoundPoses for every enemy of Shooter at Time. */
 	void BeginRewind(double Time, const ATacticalCharacter* Shooter) const;
 	void EndRewind() const;
 
 	FTrackedSlot Slots[LagCompensation::MaxTrackedCharacters];
 
-	TArray<FFrameRecord> History;
-	int32 NewestIndex = INDEX_NONE;
-	int32 NumRecorded = 0;
+	FFrameHistory History;
 
 	/** Scratch "rewound world" used by FScopedLagCompensation. Mutable: rewinding is logically const. */
 	mutable FCharacterPoseRecord RewoundPoses[LagCompensation::MaxTrackedCharacters];

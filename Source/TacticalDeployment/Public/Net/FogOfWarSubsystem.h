@@ -6,6 +6,7 @@
 #include "Engine/DeveloperSettings.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "WorldCollision.h"
+#include "Net/FogOfWarRules.h"
 #if UE_WITH_IRIS
 #include "Iris/ReplicationSystem/NetRefHandle.h"
 #include "Iris/ReplicationSystem/NetObjectGroupHandle.h"
@@ -35,12 +36,13 @@ public:
 	float VisibilityGraceTime = 0.25f;
 
 	/**
-	 * Upper bound on how far ahead (viewer latency + stride) positions are extrapolated when
-	 * testing LOS. Reveals enemies slightly *before* they become visible, so the client already
-	 * has them when the corner is cleared: no peeker pop-in.
+	 * Upper bound on how far ahead positions are extrapolated when testing LOS (viewer: RTT +
+	 * evaluation latency; target: evaluation latency). Reveals enemies slightly *before* they
+	 * become visible, so the client already has them when the corner is cleared: no pop-in.
+	 * Players whose RTT exceeds this minus ~23 ms get late reveals on their own peeks.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Fog of War", meta = (Units = "s"))
-	float MaxRevealLookahead = 0.15f;
+	float MaxRevealLookahead = 0.2f;
 
 	/** Target sample points are pushed out by capsule radius * this (optimistic silhouette). */
 	UPROPERTY(config, EditAnywhere, Category = "Fog of War", meta = (ClampMin = "1"))
@@ -97,7 +99,6 @@ public:
 
 private:
 	static constexpr int32 MaxSlots = 12;
-	static constexpr int32 NumSamplePoints = 5;
 
 	struct FTrackedCharacter
 	{
@@ -133,7 +134,7 @@ private:
 
 	bool ComputeRelevancy(const ATacticalCharacter* ViewerCharacter, int32 ViewerSlot, const ATacticalCharacter* Target, int32 TargetSlot, double Now) const;
 
-	float GetRevealLookahead(const ATacticalCharacter* Viewer) const;
+	FogOfWarRules::FRevealLookahead GetRevealLookahead(const ATacticalCharacter* Viewer) const;
 	void DispatchTraces(double Now);
 	void OnTraceCompleted(const FTraceHandle& Handle, FTraceDatum& Datum);
 

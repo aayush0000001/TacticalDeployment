@@ -2,6 +2,7 @@
 
 #include "Weapons/TacticalWeapon.h"
 #include "Weapons/TacticalPhysicalMaterial.h"
+#include "Weapons/ShotRules.h"
 #include "Character/TacticalCharacter.h"
 #include "Character/TacticalCharacterMovementComponent.h"
 #include "Combat/LagCompensationComponent.h"
@@ -10,6 +11,7 @@
 #include "Net/FogOfWarSubsystem.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerState.h"
 #include "TimerManager.h"
 #include "Net/UnrealNetwork.h"
 #include "Net/Core/PushModel/PushModel.h"
@@ -248,8 +250,17 @@ void ATacticalWeapon::Server_FireWeapon_Implementation(double ViewTime, FVector_
 		return;
 	}
 
-	LastServerClientViewTime = ViewTime;
-	ServerResolveShot(ViewTime, StartTrace, AimDirection);
+	// Fire rate on client stamps: immune to network jitter bunching RPCs together.
+	const APlayerState* ShooterState = OwnerCharacter->GetPlayerState();
+	const double RoundTrip = ShooterState ? ShooterState->GetPingInMilliseconds() * 0.001 : 0.0;
+	double CadenceTime = ViewTime;
+	if (!ServerCadence.TryAcceptShot(ViewTime, Now, RoundTrip + TacticalNet::ProxyInterpolationDelay, Stats->GetFireInterval(), &CadenceTime))
+	{
+		UE_LOG(LogTacticalHitReg, Warning, TEXT("%s: fire cadence violation (stamp age %.4f s)."), *GetNameSafe(OwnerCharacter), Now - ViewTime);
+		return;
+	}
+
+	ServerResolveShot(ViewTime, CadenceTime, StartTrace, AimDirection);
 
 	UE_CLOG(ShotIndex != FMath::Min(ServerSpray.GetShotIndex() - 1, 255), LogTacticalHitReg, VeryVerbose,
 		TEXT("Spray index desync on %s: client %d server %d"), *GetName(), ShotIndex, ServerSpray.GetShotIndex() - 1);
@@ -276,19 +287,6 @@ bool ATacticalWeapon::ServerValidateFire(double ServerNow, double ViewTime, cons
 		return false;
 	}
 
-	// Cadence on client stamps: immune to network jitter bunching RPCs together. Stamps can't be
-	// in the future nor older than the history window, so a client can never "bank" more than
-	// that window of fire time; over any longer span it is bound by real server time.
-	if (ViewTime - LastServerClientViewTime < Stats->GetFireInterval() * 0.95)
-	{
-		UE_LOG(LogTacticalHitReg, Warning, TEXT("%s: fire cadence violation (%.4f s)."), *GetNameSafe(OwnerCharacter), ViewTime - LastServerClientViewTime);
-		return false;
-	}
-	if (ViewTime > ServerNow + TacticalNet::ServerFrameTime || ViewTime < ServerNow - LagCompensation::HistorySeconds)
-	{
-		return false;
-	}
-
 	// The shot must originate at our authoritative eye (moves were flushed before the RPC).
 	if (FVector::DistSquared(Start, OwnerCharacter->GetPawnViewLocation()) > FMath::Square(MaxEyeLocationError))
 	{
@@ -298,16 +296,17 @@ bool ATacticalWeapon::ServerValidateFire(double ServerNow, double ViewTime, cons
 	return true;
 }
 
-void ATacticalWeapon::ServerResolveShot(double ViewTime, const FVector& Start, const FVector& AimDirection)
+void ATacticalWeapon::ServerResolveShot(double ViewTime, double CadenceTime, const FVector& Start, const FVector& AimDirection)
 {
 	SCOPE_CYCLE_COUNTER(STAT_WeaponResolveShot);
 
 	// 1) Authoritative spray: deterministic recoil by bullet index, spread from server state.
-	ServerSpray.Recover(ViewTime, *Stats);
+	//    Timed on the gate's cadence time, so forged stamp gaps cannot buy recoil recovery.
+	ServerSpray.Recover(CadenceTime, *Stats);
 	const FVector2D Recoil = Stats->EvaluateRecoil(ServerSpray.GetShotIndex());
 	const float Spread = Stats->ComputeSpread(BuildSpreadInputs(ServerSpray.FiringError));
 	const FVector Direction = UWeaponStats::ApplyRecoilAndSpread(AimDirection.Rotation(), Recoil, Spread, ServerSpreadStream);
-	ServerSpray.CommitShot(ViewTime, *Stats);
+	ServerSpray.CommitShot(CadenceTime, *Stats);
 
 	--AmmoInMagazine;
 	MARK_PROPERTY_DIRTY_FROM_NAME(ATacticalWeapon, AmmoInMagazine, this);
@@ -333,71 +332,48 @@ void ATacticalWeapon::ServerResolveShot(double ViewTime, const FVector& Start, c
 
 FVector ATacticalWeapon::TraceWithPenetration(const FScopedLagCompensation& Rewind, const FVector& Start, const FVector& Direction)
 {
-	const FPenetrationTierParams& Tier = Stats->GetPenetrationParams();
-
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(WeaponTrace), /*bTraceComplex*/ true);
 	Params.AddIgnoredActor(this);
 	Params.AddIgnoredActor(OwnerCharacter);
 	Params.bReturnPhysicalMaterial = true;
 
-	FVector SegmentStart = Start;
-	float Travelled = 0.f;
-	float RemainingPower = Tier.Power;
-	float DamageScale = 1.f;
+	UWorld* World = GetWorld();
+	FHitResult LastWorldHit; // The exit probe needs the component of the surface just entered.
+	FRewoundHit LastBodyHit;
 
-	for (int32 Penetrations = 0; ; ++Penetrations)
+	// World geometry only: characters ignore WeaponTrace and are hit via rewound hitboxes.
+	auto TraceWorld = [&](const FVector& From, const FVector& To, FBulletSurfaceHit& Out)
 	{
-		const float RemainingRange = Stats->MaxRange - Travelled;
-		if (RemainingRange <= 0.f)
+		if (!World->LineTraceSingleByChannel(LastWorldHit, From, To, TacticalCollision::WeaponTrace, Params))
 		{
-			return SegmentStart;
+			return false;
 		}
-
-		// World geometry only: characters ignore WeaponTrace.
-		const FVector SegmentEnd = SegmentStart + Direction * RemainingRange;
-		FHitResult WorldHit;
-		const bool bHitWorld = GetWorld()->LineTraceSingleByChannel(WorldHit, SegmentStart, SegmentEnd, TacticalCollision::WeaponTrace, Params);
-		const FVector OpenEnd = bHitWorld ? FVector(WorldHit.ImpactPoint) : SegmentEnd;
-
-		// Rewound hitboxes in the open air before the next surface.
-		FRewoundHit BodyHit;
-		if (Rewind.LineTrace(SegmentStart, OpenEnd, BodyHit))
+		Out.ImpactPoint = LastWorldHit.ImpactPoint;
+		Out.Distance = LastWorldHit.Distance;
+		Out.Density = UTacticalPhysicalMaterial::GetDensity(LastWorldHit.PhysMaterial.Get());
+		return true;
+	};
+	auto ProbeExit = [&](const FBulletSurfaceHit&, const FVector& Dir, float MaxThickness, FVector& OutExit)
+	{
+		return FindExitPoint(LastWorldHit, Dir, MaxThickness, OutExit);
+	};
+	auto TraceBodies = [&](const FVector& From, const FVector& To, FBulletBodyHit& Out)
+	{
+		if (!Rewind.LineTrace(From, To, LastBodyHit))
 		{
-			ApplyHitDamage(BodyHit.Character, BodyHit.Zone, Travelled + BodyHit.Distance, DamageScale);
-			return BodyHit.Location;
+			return false;
 		}
+		Out.Location = LastBodyHit.Location;
+		Out.Distance = LastBodyHit.Distance;
+		return true;
+	};
 
-		if (!bHitWorld)
-		{
-			return SegmentEnd;
-		}
-		Travelled += WorldHit.Distance;
-
-		if (Penetrations >= Tier.MaxSurfaces)
-		{
-			return WorldHit.ImpactPoint;
-		}
-
-		// 3) Wallbang: cost = thickness * density, damage scales with the budget left.
-		const float Density = UTacticalPhysicalMaterial::GetDensity(WorldHit.PhysMaterial.Get());
-		FVector Exit;
-		if (Density >= TNumericLimits<float>::Max() || !FindExitPoint(WorldHit, Direction, Tier.MaxThickness, Exit))
-		{
-			return WorldHit.ImpactPoint;
-		}
-
-		const float Thickness = static_cast<float>(FVector::Dist(WorldHit.ImpactPoint, Exit));
-		const float Cost = Thickness * Density;
-		if (Cost >= RemainingPower)
-		{
-			return WorldHit.ImpactPoint;
-		}
-
-		RemainingPower -= Cost;
-		DamageScale *= 1.f - (Cost / Tier.Power);
-		Travelled += Thickness;
-		SegmentStart = Exit + Direction * 0.5f; // Step off the exit face.
+	const FBulletResult Result = ShotRules::SolveBulletPath(Start, Direction, Stats->MaxRange, Stats->GetPenetrationParams(), TraceWorld, ProbeExit, TraceBodies);
+	if (Result.bHitBody)
+	{
+		ApplyHitDamage(LastBodyHit.Character, LastBodyHit.Zone, Result.TravelledDistance, Result.DamageScale);
 	}
+	return Result.ImpactPoint;
 }
 
 bool ATacticalWeapon::FindExitPoint(const FHitResult& EntryHit, const FVector& Direction, float MaxThickness, FVector& OutExit) const
@@ -413,15 +389,10 @@ bool ATacticalWeapon::FindExitPoint(const FHitResult& EntryHit, const FVector& D
 	const FVector Probe = FVector(EntryHit.ImpactPoint) + Direction * MaxThickness;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(WeaponExitTrace), /*bTraceComplex*/ true);
 	FHitResult ExitHit;
-	if (!Component->LineTraceComponent(ExitHit, Probe, EntryHit.ImpactPoint, Params))
+	const bool bProbeHit = Component->LineTraceComponent(ExitHit, Probe, EntryHit.ImpactPoint, Params);
+	if (!ShotRules::IsValidExitProbe(bProbeHit, ExitHit.bStartPenetrating, ExitHit.ImpactPoint, EntryHit.ImpactPoint))
 	{
-		return false;
-	}
-
-	// If the probe ended *inside* the solid, the backward ray re-hits the entry face: too thick.
-	if (FVector::DistSquared(ExitHit.ImpactPoint, EntryHit.ImpactPoint) < FMath::Square(0.1f))
-	{
-		return false;
+		return false; // Thicker than this tier can probe (see IsValidExitProbe).
 	}
 
 	OutExit = ExitHit.ImpactPoint;

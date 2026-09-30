@@ -2,6 +2,7 @@
 
 #include "Game/TacticalGameState.h"
 #include "Combat/LagCompensationComponent.h"
+#include "Game/RoundRules.h"
 #include "Game/SpikeBase.h"
 #include "Net/UnrealNetwork.h"
 #include "Net/Core/PushModel/PushModel.h"
@@ -32,9 +33,7 @@ float ATacticalGameState::GetPhaseTimeRemaining() const
 
 bool ATacticalGameState::IsMovementLocked() const
 {
-	return RoundState.Phase == ETacticalMatchPhase::PreMatch
-		|| RoundState.Phase == ETacticalMatchPhase::BuyPhase
-		|| RoundState.Phase == ETacticalMatchPhase::MatchEnded;
+	return RoundRules::IsMovementLocked(RoundState.Phase);
 }
 
 void ATacticalGameState::MarkRoundStateDirty(ETacticalMatchPhase PreviousPhase)

@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/GameStateBase.h"
 #include "Core/TacticalTypes.h"
+#include "Game/RoundRules.h"
 #include "TacticalGameState.generated.h"
 
 class ULagCompensationComponent;
@@ -75,9 +76,9 @@ public:
 	bool IsMovementLocked() const;
 
 	/** Weapons are live only during ActionPhase. */
-	bool IsCombatAllowed() const { return RoundState.Phase == ETacticalMatchPhase::ActionPhase; }
+	bool IsCombatAllowed() const { return RoundRules::IsCombatAllowed(RoundState.Phase); }
 
-	bool IsShopOpen() const { return RoundState.Phase == ETacticalMatchPhase::BuyPhase || RoundState.Phase == ETacticalMatchPhase::BarrierPhase; }
+	bool IsShopOpen() const { return RoundRules::IsShopOpen(RoundState.Phase); }
 
 	ULagCompensationComponent* GetLagCompensation() const { return LagCompensation; }
 

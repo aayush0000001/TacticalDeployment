@@ -22,4 +22,16 @@ Read **[Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md)** for the full design, the p
 | 5. Rounds and spike | `Game/TacticalGameMode.*`, `Game/TacticalGameState.*`, `Game/TacticalPlayerState.*`, `Game/SpikeBase.*` |
 | 6. Camera and viewmodel | `Character/TacticalCharacter.*`, `Animation/TacticalAnimInstance.*` |
 
-> The code has not been compiled against an engine install in this repository yet, and no content (meshes, Blueprints, maps) is included. See *Known gaps* in the architecture doc.
+## Verification
+
+No Unreal Engine install is available where this was built, so the game rules are verified in a headless simulation. The harness compiles the real rule headers and `WeaponStats.cpp` against a thin UE-core stand-in and plays 46 scenarios in a virtual world: corner peeks under latency, headshots on strafing targets, wallbangs, fire-rate cheats, counter-strafing, spike races and 1000 full matches. A static checker covers the UE-bound wiring (RPCs, replication registration, push-model dirtiness).
+
+```
+cmake -S Tools/Simulation -B Tools/Simulation/Build -DCMAKE_BUILD_TYPE=Release
+cmake --build Tools/Simulation/Build -j && Tools/Simulation/Build/TacticalSimulation
+python3 Tools/Lint/check_unreal_conventions.py
+```
+
+Results, the defects the simulation found (and which are fixed) and what it cannot cover are in [Docs/ARCHITECTURE.md, section 10](Docs/ARCHITECTURE.md#10-verification-headless-simulation).
+
+> The UE-bound classes (actors, components, RPCs, Iris) have not been compiled against an engine install yet, and no content (meshes, Blueprints, maps) is included. See *Known gaps* in the architecture doc.

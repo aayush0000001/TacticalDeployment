@@ -2,6 +2,7 @@
 
 #include "Game/TacticalGameMode.h"
 #include "Character/TacticalCharacter.h"
+#include "Game/RoundRules.h"
 #include "Game/SpikeBase.h"
 #include "Game/TacticalGameState.h"
 #include "Game/TacticalPlayerController.h"
@@ -56,29 +57,25 @@ void ATacticalGameMode::EnterPhase(ETacticalMatchPhase Phase, float Duration)
 void ATacticalGameMode::OnPhaseTimerExpired()
 {
 	ATacticalGameState* GameState = GetTacticalGameState();
-	switch (GameState->GetPhase())
+	switch (RoundRules::OnPhaseTimerExpired(GameState->GetPhase(), GameState->GetRoundState().bSpikePlanted))
 	{
-	case ETacticalMatchPhase::PreMatch:
+	case RoundRules::EPhaseTimerAction::StartNewRound:
 		StartNewRound();
 		break;
 
-	case ETacticalMatchPhase::BuyPhase:
+	case RoundRules::EPhaseTimerAction::EnterBarrierPhase:
 		EnterPhase(ETacticalMatchPhase::BarrierPhase, BarrierPhaseDuration);
 		break;
 
-	case ETacticalMatchPhase::BarrierPhase:
+	case RoundRules::EPhaseTimerAction::EnterActionPhase:
 		EnterPhase(ETacticalMatchPhase::ActionPhase, ActionPhaseDuration);
 		break;
 
-	case ETacticalMatchPhase::ActionPhase:
-		// While the spike is planted the timer is the detonation fuse, handled by the spike.
-		if (!GameState->GetRoundState().bSpikePlanted)
-		{
-			EndRound(GameState->GetDefendingTeam(), ETacticalRoundEndReason::TimeExpired);
-		}
+	case RoundRules::EPhaseTimerAction::DefendersWinOnTime:
+		EndRound(GameState->GetDefendingTeam(), ETacticalRoundEndReason::TimeExpired);
 		break;
 
-	case ETacticalMatchPhase::PostRound:
+	case RoundRules::EPhaseTimerAction::FinishPostRound:
 		if (HasTeamWonMatch(ETacticalTeam::TeamA) || HasTeamWonMatch(ETacticalTeam::TeamB))
 		{
 			EnterPhase(ETacticalMatchPhase::MatchEnded, 0.f);
@@ -100,7 +97,7 @@ void ATacticalGameMode::StartNewRound()
 	bRoundResolved = false;
 
 	// Sides swap at halftime. (Overtime side alternation would slot in here.)
-	const ETacticalTeam Attackers = CurrentRound <= HalftimeAfterRound ? ETacticalTeam::TeamA : ETacticalTeam::TeamB;
+	const ETacticalTeam Attackers = RoundRules::GetAttackingTeam(CurrentRound, HalftimeAfterRound);
 	GetTacticalGameState()->ServerBeginRound(CurrentRound, Attackers);
 
 	// Phase first: movement is locked (BuyPhase) before anyone spawns.
@@ -139,14 +136,7 @@ void ATacticalGameMode::EndRound(ETacticalTeam Winner, ETacticalRoundEndReason R
 bool ATacticalGameMode::HasTeamWonMatch(ETacticalTeam Team) const
 {
 	const ATacticalGameState* GameState = GetTacticalGameState();
-	const int32 Score = GameState->GetScore(Team);
-	const int32 Other = GameState->GetScore(GetOpposingTeam(Team));
-	if (Score < RoundsToWin)
-	{
-		return false;
-	}
-	// 12-12 or later: overtime, win by two.
-	return Other >= RoundsToWin - 1 ? (Score - Other) >= 2 : true;
+	return RoundRules::HasTeamWonMatch(GameState->GetScore(Team), GameState->GetScore(GetOpposingTeam(Team)), RoundsToWin);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -177,14 +167,11 @@ void ATacticalGameMode::CheckEliminationWin()
 	const ETacticalTeam Attackers = GameState->GetAttackingTeam();
 	const ETacticalTeam Defenders = GameState->GetDefendingTeam();
 
-	if (CountAlive(Defenders) == 0)
+	const ETacticalTeam Winner = RoundRules::EvaluateElimination(CountAlive(Attackers), CountAlive(Defenders),
+		GameState->GetRoundState().bSpikePlanted, Attackers);
+	if (Winner != ETacticalTeam::Spectator)
 	{
-		EndRound(Attackers, ETacticalRoundEndReason::Elimination);
-	}
-	else if (CountAlive(Attackers) == 0 && !GameState->GetRoundState().bSpikePlanted)
-	{
-		// Attackers wiped after planting do NOT lose: defenders still have to defuse.
-		EndRound(Defenders, ETacticalRoundEndReason::Elimination);
+		EndRound(Winner, ETacticalRoundEndReason::Elimination);
 	}
 }
 

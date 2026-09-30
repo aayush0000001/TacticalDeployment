@@ -3,7 +3,7 @@
 A 5v5, round-based tactical FPS with no abilities: gunplay, deterministic movement, and a spike (bomb) objective.
 Target: **Unreal Engine 5.4+**, **authoritative dedicated server at 128 Hz** (7.8125 ms frame budget), **Iris** replication with push-model properties.
 
-> Status: this is the C++ architecture and core implementation. It has not been compiled or run yet in this repository (no engine or content is checked in). Blueprints, meshes, AnimBPs, input assets and maps still need to be authored against these classes. See [Integration checklist](#integration-checklist) and [Known gaps](#known-gaps).
+> Status: the C++ architecture and core implementation. All game rules (hit registration, rewind, wallbangs, spray, spread, fire-rate gate, fog-of-war decisions, movement tuning, tagging, spike, round flow) are compiled and exercised by a headless simulation harness, 46 scenarios, all passing (see [Verification](#10-verification-headless-simulation)). The UE-bound classes (actors, components, RPCs, Iris) have **not** been compiled against an engine install yet; a static checker covers their Unreal wiring. Blueprints, meshes, AnimBPs, input assets and maps still need to be authored. See [Integration checklist](#integration-checklist) and [Known gaps](#known-gaps).
 
 ---
 
@@ -56,13 +56,20 @@ Config/DefaultEngine.ini                 128 Hz, Iris, push model, collision cha
 Config/DefaultGame.ini                   round rules, fog-of-war tuning
 Source/TacticalDeployment/
   Public/Core/TacticalTypes.h            enums, channels, 128 Hz constants, pitch quantization
-  Public/Net/FogOfWarSubsystem.h         Pillar 1 - network fog of war (+ settings)
-  Public/Combat/LagCompensationComponent.h   Pillar 2 - FFrameRecord, ring buffer, FScopedLagCompensation
-  Public/Weapons/WeaponStats.h           Pillar 3 - UWeaponStats, spray state, spread/recoil math
-  Public/Weapons/TacticalWeapon.h        Pillar 3 - fire RPC, validation, penetration solver
-  Public/Weapons/TacticalPhysicalMaterial.h  Pillar 3 - density per material
+  Public/Core/ClockSync.h                * NTP-style clock sync -> view-time stamps
+  Public/Net/FogOfWarRules.h             * Pillar 1 - relevancy decision, lookahead, sample points, noise
+  Public/Net/FogOfWarSubsystem.h         Pillar 1 - async LOS traces, Iris exclusion groups (+ settings)
+  Public/Combat/HitboxRewind.h           * Pillar 2 - FFrameRecord, FFrameHistory ring buffer, ray-capsule, rewind time
+  Public/Combat/LagCompensationComponent.h   Pillar 2 - recording from bones, FScopedLagCompensation
+  Public/Weapons/WeaponStats.h           * Pillar 3 - UWeaponStats, spray state, spread/recoil math
+  Public/Weapons/ShotRules.h             * Pillar 3 - bullet path solver (wallbangs), exit probe rule, fire-rate gate
+  Public/Weapons/TacticalWeapon.h        Pillar 3 - fire RPC, validation, world/hitbox queries
+  Public/Weapons/TacticalPhysicalMaterial.h  * Pillar 3 - density per material
+  Public/Character/TacticalMovementTuning.h  * Pillar 4 - tuning constants, max-speed rule
   Public/Character/TacticalCharacterMovementComponent.h  Pillar 4 - snappy CMC, saved moves
-  Public/Character/TakeDamageTagging.h   Pillar 4 - ITakeDamageTagging, FTaggingState
+  Public/Character/TakeDamageTagging.h   * Pillar 4 - ITakeDamageTagging, FTaggingState (curve + stacking)
+  Public/Game/RoundRules.h               * Pillar 5 - sides, match point, elimination, phase gates, timer transitions
+  Public/Game/SpikeRules.h               * Pillar 5 - plant/defuse timing, 50% checkpoint, defuse-vs-detonation race
   Public/Game/TacticalGameMode.h         Pillar 5 - state machine, economy, shop
   Public/Game/TacticalGameState.h        Pillar 5 - FTacticalRoundState, lag comp owner
   Public/Game/TacticalPlayerState.h      Pillar 5 - team, credits, K/D
@@ -70,7 +77,11 @@ Source/TacticalDeployment/
   Public/Game/TacticalPlayerController.h clock sync (view time), shop RPCs
   Public/Character/TacticalCharacter.h   Pillar 6 - Mesh1P/Mesh3P, camera, relevancy, damage
   Public/Animation/TacticalAnimInstance.h  Pillar 6 - AimOffset inputs
+Tools/Simulation/                        headless harness: UE-core shim + 46 scenario tests
+Tools/Lint/check_unreal_conventions.py   static checks for RPCs, replication and push-model wiring
 ```
+
+`*` = engine-light rules: plain data and math on UE core types, called by the UE classes and compiled directly by the simulation harness.
 
 ### A shot, end to end
 
@@ -82,8 +93,8 @@ sequenceDiagram
     C->>C: LocalFireShot(): predict spray index, cosmetic spread, view kick, tracer
     C->>S: FlushServerMoves() (velocity up to date)
     C->>S: Server_FireWeapon(ViewTime, Start, End, ShotIndex)
-    S->>S: ServerValidateFire: alive, phase, ammo, equip, cadence on client stamps, eye position
-    S->>S: Spray.Recover(ViewTime) -> recoil(index) + spread(server velocity, server-seeded RNG)
+    S->>S: ServerValidateFire: alive, phase, ammo, equip, eye position; FFireCadenceGate on stamps
+    S->>S: Spray.Recover(cadence time) -> recoil(index) + spread(server velocity, server-seeded RNG)
     S->>S: ResolveRewindTime(): client stamp vs. Now - RTT - interp, clamp 350 ms
     S->>S: FScopedLagCompensation: rewind enemy hitboxes (lerp between two FFrameRecords)
     S->>S: TraceWithPenetration(): world trace -> hitbox trace -> exit probe -> density cost
@@ -129,7 +140,10 @@ Headroom for GC and hitches is ~3 ms. Configure incremental GC (`gc.IncrementalB
 
 Each server frame, half of the ordered (viewer, enemy) pairs are evaluated (`EvaluationStride=2`, so every pair runs at 64 Hz):
 
-1. **Latency-aware positions.** The viewer's eye and the target are both extrapolated by `min(viewer RTT/2 + stride time, MaxRevealLookahead)`. The server reveals an enemy slightly *before* they come into view, so it is already on the client when the corner clears. This avoids "peeker pop-in", which was the main complaint Riot documented for VALORANT's fog of war.
+1. **Latency-aware positions** (`FogOfWarRules::ComputeRevealLookahead`). The server reveals an enemy slightly *before* they come into view, so it is already on the client when the corner clears. This avoids "peeker pop-in", which was the main complaint Riot documented for VALORANT's fog of war. Evaluation latency is `(EvaluationStride + 1)` frames: up to `Stride` frames waiting for the pair's turn, plus one frame for async results.
+   - **Target** extrapolation = evaluation latency. The viewer renders the target from server snapshots, so the data only has to be sent by the frame the target becomes visible.
+   - **Viewer** extrapolation = **full RTT** + evaluation latency. A peeking client predicts its own movement, so it is ahead of the server by the upstream leg, and the enemy data still has to travel the downstream leg. The first design used RTT/2 for both terms; the simulation showed that version revealing enemies late (pop-in) at 100 ms RTT and above.
+   - Both are capped at `MaxRevealLookahead` (200 ms). Past about 177 ms RTT, a player's own peeks reveal slightly late. That is an accepted anti-ESP trade-off.
 2. **Optimistic silhouette.** Five sample points: head, chest, both shoulders pushed out by `radius * SilhouetteExpansion`, and feet. The shoulders are the first thing to clear a corner.
 3. **Async `Test` traces** on `FogOcclusion` with simple collision. This is the cheapest query type and runs off the game thread. Results arrive next frame through `FTraceDelegate`. `UserData` packs the pair index and a generation counter, so results for a recycled slot are discarded.
 4. **Relevancy decision** (`ComputeRelevancy`):
@@ -159,16 +173,21 @@ Each server frame, half of the ordered (viewer, enemy) pairs are evaluated (`Eva
 ### Data (`LagCompensationComponent.h`)
 
 ```cpp
-struct FHitboxSnapshot      { FVector3f Center; FQuat4f Rotation; };               // 28 B
+// Combat/HitboxRewind.h
+struct FHitboxSnapshot      { FVector3f Center; FQuat4f Rotation;                  // 40 B, self-contained:
+                              float Radius; float HalfSegment; EHitZone Zone; };   // shape + zone travel with it
 struct FCharacterPoseRecord { FVector3f BoundsCenter; float BoundsRadius;
                               uint8 NumHitboxes; bool bValid;
                               FHitboxSnapshot Hitboxes[16]; };
 struct FFrameRecord         { double ServerTime;
                               FCharacterPoseRecord Characters[12]; };               // one server frame
+class  FFrameHistory;       // fixed-capacity ring buffer + binary-search FindBracket()
 ```
 
+Snapshots carry their own shape and zone, so a rewound trace never consults the live character. That character may have died, respawned or changed mesh since the frame was recorded.
+
 - **Hitboxes are separate from the movement capsule.** `FHitboxDefinition` (bone, zone, radius, half-segment, local offset/rotation) is authored on the character Blueprint. The capsule and meshes ignore `WeaponTrace`, so a bullet can only hit a hitbox.
-- **Ring buffer:** `HistoryCapacity = 136` frames, which is 1000 ms at 128 Hz plus 8 frames of slack for hitches. It is allocated once in `BeginPlay`, and `RecordFrame` does no allocations. Memory is about 760 KB.
+- **Ring buffer:** `HistoryCapacity = 136` frames, which is 1000 ms at 128 Hz plus 8 frames of slack for hitches. It is allocated once in `BeginPlay`, and `RecordFrame` does no allocations. Memory is about 1 MB.
 - **Recording** happens in `TG_PostUpdateWork`, after animation has produced final bone transforms. The dedicated server must actually evaluate the pose: `ATacticalCharacter::PostInitializeComponents` sets `AlwaysTickPoseAndRefreshBones` and disables URO on `Mesh3P`.
 
 ### How far to rewind
@@ -218,7 +237,9 @@ Damage (`BaseDamage`, `HeadMultiplier`, `ArmMultiplier`, `LegMultiplier`, steppe
 
 ### Anti-cheat validation (`ServerValidateFire`)
 
-Alive, holding this weapon, not planting or defusing, `ActionPhase`, not reloading, equip time elapsed, ammo left. **Cadence** is checked on client stamps, which are immune to jitter bunching. Stamps may not be in the future or older than the history window, so a client can never bank more than that window of fire time. **Eye position** must be within 48 cm of the server's `GetPawnViewLocation`.
+Alive, holding this weapon, not planting or defusing, `ActionPhase`, not reloading, equip time elapsed, ammo left. **Eye position** must be within 48 cm of the server's `GetPawnViewLocation`.
+
+**Fire rate** (`ShotRules::FFireCadenceGate`) is checked on client stamps, which are immune to network jitter bunching RPCs together. It uses GCRA, the generic cell rate algorithm. Each accepted shot pushes a theoretical arrival time one interval ahead, and a shot may be early by at most `min(50 ms, interval/2)`. That tolerance is needed because the client's looping fire timer can only fire on frame boundaries: at 144 FPS a 102.6 ms interval produces 97.2 ms gaps. The first design (a fixed "gap >= 95% of the interval" rule) would have rejected up to 632 of 2000 honest shots at 30 FPS in the simulation. Stamps can't be used to bank shots: anything older than the expected age (RTT + interpolation + 50 ms) is raised to that floor, and stamps from the future are rejected. Simulated cheats (2x fire rate, forged stamps, a 10-shot dump with back-dated stamps) never exceed the legitimate rate. **Spray recovery** is timed on the gate's cadence time, so forged gaps between stamps cannot buy recoil recovery.
 
 ### Wallbangs (`TraceWithPenetration`)
 
@@ -227,7 +248,9 @@ loop:
   world trace (WeaponTrace, complex, returns PhysMaterial) -> entry
   rewound-hitbox trace over [segment start, entry]         -> body hit? apply damage, stop
   exit = LineTraceComponent(entry + dir*MaxThickness -> entry) on the same component
-         (tracing backwards finds the far face; a probe that ended inside solid re-hits the entry: too thick)
+         (tracing backwards finds the far face; ShotRules::IsValidExitProbe rejects a probe that
+          started inside the solid, which simple collision reports as a start-penetrating hit,
+          or that re-hit the entry face: the wall is thicker than this tier can probe)
   cost = thickness_cm * UTacticalPhysicalMaterial::PenetrationDensity
   cost >= remaining power -> stop;  else power -= cost, damage *= 1 - cost/tier power
 ```
@@ -238,7 +261,7 @@ loop:
 | Medium | 25 | 40 cm | 2 |
 | High | 50 | 80 cm | 3 |
 
-Reference densities: glass 0.1, drywall 0.4, wood 0.6, concrete 2.0, sheet metal 3.0. `bImpenetrable` is for map boundaries. Final damage is `Base * zone * range bracket * penetration scale`.
+Reference densities: glass 0.1, drywall 0.4, wood 0.6, concrete 2.0, sheet metal 3.0. `bImpenetrable` is for map boundaries. Final damage is `Base * zone * range bracket * penetration scale`. The loop itself is `ShotRules::SolveBulletPath`. The weapon supplies the world and rewound-hitbox queries, and the simulation supplies virtual ones.
 
 ---
 
@@ -254,12 +277,20 @@ In UE 5.4 the Mover plugin is experimental, and its rollback path (Network Predi
 |---|---|---|
 | `MaxWalkSpeed` (run) | 675 cm/s | |
 | `MaxShiftWalkSpeed` | 405 cm/s | Silent: no fog-of-war noise. |
-| `MaxAcceleration` | 5200 | Full speed in ~130 ms. |
+| `MaxAcceleration` | 5200 | 95% of run speed in 125 ms (measured). |
 | `GroundFriction` | 12 | With input opposing velocity, CalcVelocity bends velocity toward the input: about 19% of speed removed per 128 Hz tick. |
-| `BrakingDecelerationWalking` + `BrakingFriction` | 3400 / 4 | Releasing a key stops you in ~200 ms. |
-| `MaxSimulationTimeStep` | 1/128 | Every client frame rate integrates the same trajectory. |
+| `BrakingDecelerationWalking` + `BrakingFriction` | 3400 / 4 | Releasing a key stops you in 148 ms (measured). |
+| `BrakingSubStepTime` | 1/75 | The finest the engine allows (it clamps to [1/75, 1/20]). |
+| `MaxSimulationTimeStep` | 1/128 | Caps sub-steps. From 30 to 360 FPS, the counter-strafe slide varies by 3 cm and time-to-accurate by 4 ms (frame quantization). The server replays each client's exact steps, so this never causes corrections. |
 
-A **counter-strafe** crosses the 30% accuracy threshold in about 45 ms. **Releasing** the key takes about 200 ms. That gap is the skill.
+Measured with a model of the engine's `PhysWalking`/`CalcVelocity`/`ApplyVelocityBraking` at 128 Hz, using these exact constants from `TacticalMovementTuning.h`:
+
+| From full run | Accurate (<= 30% speed) | Stopped | Slide |
+|---|---|---|---|
+| **Counter-strafe** (opposite key) | 31 ms | 55 ms | 11 cm |
+| **Release** key | 94 ms | 148 ms | 41 cm |
+
+That 3x gap is the skill.
 
 **Predicted intents:** shift-walk (`FLAG_Custom_0`) and the plant/defuse movement lock (`FLAG_Custom_1`) ride in `FSavedMove_Tactical`'s compressed flags. The server applies them on exactly the same moves the client predicted them on, so they cause no corrections. The phase freeze (`PreMatch`, `BuyPhase`) is read from replicated `FTacticalRoundState` on both sides, at the cost of at most one correction per phase change.
 
@@ -353,6 +384,52 @@ stateDiagram-v2
 
 ---
 
+## 10. Verification (headless simulation)
+
+No Unreal Engine install is available where this was built, so verification has two parts.
+
+**`Tools/Simulation`** compiles the project's real engine-light headers and `WeaponStats.cpp` against a thin stand-in for UE core types (`Shim/CoreMinimal.h`: vectors, rotators, quaternions, `FMath`, `FRandomStream`, `TArray`, reflection macros stubbed out). It then runs scenario tests in a virtual world: box geometry with UE-like trace semantics, a 13-piece hitbox rig, a latency and jitter network model, and a model of the CMC's walking physics.
+
+```
+cmake -S Tools/Simulation -B Tools/Simulation/Build -DCMAKE_BUILD_TYPE=Release
+cmake --build Tools/Simulation/Build -j
+Tools/Simulation/Build/TacticalSimulation            # or: ctest --test-dir Tools/Simulation/Build
+python3 Tools/Lint/check_unreal_conventions.py
+```
+
+| Pillar | Scenario | Result |
+|---|---|---|
+| 1 | Enemy strafes out from a corner, RTT 20-150 ms | Revealed 31 ms before first visible frame |
+| 1 | Viewer peeks a corner, RTT 20-150 ms | Revealed 37-50 ms beyond the required full RTT |
+| 1 | Shift-walking enemy behind a wall for 5 s | Replicated on 0 of 640 frames |
+| 1 | Running enemy at 27 m / 29 m | Replicated (audible) / culled |
+| 2 | Strafing (A-D) target, headshots at displayed head, RTT 20-200 ms incl. asymmetric paths | 100% registered (RTT/2-only rewind: 7-39%, no rewind: 5-28%) |
+| 2 | Proxy smoothing off by +/-8 ms from the assumed 15.6 ms | 100% registered; +16 ms: 72% |
+| 2 | Clock sync, 20-75 ms legs, asymmetric 30/50 ms | View-time error <= 2.3 ms |
+| 3 | Client vs server spray index over 40 random bursts with 40 ms jitter | 0 mismatches (arrival-time timing: 152) |
+| 3 | Wallbangs: drywall, concrete, two walls, thick glass, boundary, range | Budget, surface count and damage scale exact |
+| 3 | Honest auto-fire at 30-360 FPS +/-25% frame jitter, 2000 shots each | 0 rejected |
+| 3 | 2x rate / forged stamps / back-dated 10-shot dump | <= legit rate / 2 accepted / 1 accepted |
+| 4 | Counter-strafe vs release | 31 ms vs 94 ms to accurate |
+| 4 | Tag on the move clock, 80 ms RTT | 6 in-flight moves corrected once, 0 mismatches after replay (wall-clock: 62) |
+| 5 | Defuse released at 3.499 s / 3.5 s | 0% / 50% banked; resume needs 3.5 s |
+| 5 | Defuse completing 1 ms before detonation, evaluated 5 ms late | Defused |
+| 5 | 1000 virtual matches (22k rounds): eliminations, time-outs, plants, partial and full defuses, overtime | All scores legal (13-x or overtime win by 2), 0 rule violations |
+| 6 | 16-bit aim pitch | 0.0014 deg max error = 0.015 mm at the head (8-bit engine default: 7.4 mm) |
+
+**Mutation checks.** Six deliberate defects were injected one at a time into the real game code, and each one failed the suite: checkpoint banking raw progress, capsule caps ignored, RTT/2 viewer lookahead, the old exit-probe rule, the cadence gate without burst tolerance, and rewinding only RTT/2. Four injected wiring defects were each caught by the checker: a missing dirty mark, a missing RPC implementation, an unregistered property, and an OnRep that isn't a UFUNCTION.
+
+**Defects the simulation found and this revision fixes:**
+1. *Wallbang through over-thick walls.* With simple collision, the backward exit probe starting inside a solid returns a start-penetrating hit at the probe point, and that was accepted as the exit. Fixed by `ShotRules::IsValidExitProbe`.
+2. *Honest shots rejected at common frame rates.* The fire-rate check ignored frame quantization of the fire timer and let clients bank up to 1 s of shots. Fixed by `FFireCadenceGate`.
+3. *Forged stamp gaps bought recoil recovery.* Fixed by timing the server spray on the gate's cadence time.
+4. *Late reveals on your own peeks at 100+ ms RTT.* The viewer lookahead used RTT/2. Fixed by using the full RTT.
+5. *Rewound traces read the live character's hitbox definitions*, which were wrong if the mesh or definitions changed after recording. Fixed by making snapshots self-contained.
+6. *`FMath::ClampAngle` called with mixed float/double arguments*, which UE's template may reject. Fixed.
+7. Doc numbers (counter-strafe 45 ms / release 200 ms) replaced with measured values.
+
+**What this does not verify:** that the UE-bound classes compile against a real engine (Iris API names and `UE_VERSION` guards in particular), real animation-driven hitboxes, the actual smoothing delay of CMC Linear smoothing (calibrate `ProxyInterpolationDelay` in-engine, since the margin is about +/-10 ms), and performance under the 7.8125 ms budget.
+
 ## Integration checklist
 
 1. Create `BP_TacticalCharacter` from `ATacticalCharacter`. Assign meshes (arms and body), the AnimBPs (both parented to `UTacticalAnimInstance`), the Enhanced Input assets, and the **hitbox list** (head sphere, neck, 3 spine capsules, pelvis, upper/lower arms, thighs, calves). Add a `spike_socket` to the body skeleton.
@@ -362,10 +439,13 @@ stateDiagram-v2
 5. `BP_TacticalGameMode`: set `DefaultPawnClass`, `SpikeClass`, `DefaultSidearm` and `ShopCatalog`.
 6. Register `WeaponStats` as a Primary Asset Type in Asset Manager settings.
 7. Build the `TacticalDeploymentServer` target and verify with `stat Tactical`, `stat net`, and `net.Iris.*` debug cvars under emulated latency (`NetEmulation.PktLag=60`, `PktLagVariance=10`, `PktLoss=1`).
+8. Calibrate `TacticalNet::ProxyInterpolationDelay` against measured proxy display lag. The simulation shows about +/-10 ms of margin before headshots on strafing targets start to miss.
+9. Keep `Tools/Simulation` and `Tools/Lint` green on every change (both run in seconds).
 
 ## Known gaps
 
-- Not compiled yet in this repo. The Iris exclusion-group calls and the `UE_VERSION` guards are the most likely points to need small adjustments per engine minor version.
+- The UE-bound classes have not been compiled against an engine yet (the rules they call are compiled and tested). The Iris exclusion-group calls, `UNetConnection::GetConnectionId` and the `UE_VERSION` guards are the most likely points to need small adjustments per engine minor version.
 - Survivors do not keep their loadout between rounds, and there is no weapon drop or pickup (only the spike drops).
 - No overtime side alternation, no pistol-round economy rules, no minimap data channel.
-- No automated tests yet. The math helpers (`FWeaponSprayState`, `IntersectRayCapsule`, `FTaggingState::Evaluate`, `FSpikeInteractionState::GetProgress`) are pure functions and are the first candidates for `IMPLEMENT_SIMPLE_AUTOMATION_TEST`.
+- In-engine automation tests (`IMPLEMENT_SIMPLE_AUTOMATION_TEST` / Gauntlet) are not written yet. The simulation scenarios port directly, because they call the same rule functions.
+- A hitch longer than one fire interval makes UE's looping timer fire twice in one frame. The server gate accepts only one of those shots, so client-predicted ammo can briefly read one low until the next ammo update.

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerController.h"
+#include "Core/ClockSync.h"
 #include "TacticalPlayerController.generated.h"
 
 class UWeaponStats;
@@ -29,7 +30,7 @@ public:
 	 */
 	double GetClientViewTime() const;
 
-	float GetSmoothedRoundTripTime() const { return SmoothedRoundTrip; }
+	float GetSmoothedRoundTripTime() const { return static_cast<float>(ClockSync.GetSmoothedRoundTrip()); }
 
 	UFUNCTION(Server, Reliable)
 	void Server_PurchaseWeapon(const UWeaponStats* Weapon);
@@ -54,21 +55,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Networking")
 	float TimeSyncInterval = 0.5f;
 
-	struct FClockSample
-	{
-		double RoundTrip = 0.0;
-		double Offset = 0.0;
-	};
-
-	/** Sliding window: the lowest-RTT sample has the least queuing error (NTP's clock filter). */
-	static constexpr int32 NumClockSamples = 8;
-	FClockSample ClockSamples[NumClockSamples];
-	int32 NumValidSamples = 0;
-	int32 NextSampleIndex = 0;
-
-	double ServerTimeOffset = 0.0;
-	float SmoothedRoundTrip = 0.f;
-	bool bHasTimeSync = false;
+	FTacticalClockSync ClockSync;
 
 	FTimerHandle TimeSyncTimer;
 };

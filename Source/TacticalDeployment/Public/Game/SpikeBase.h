@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Core/TacticalTypes.h"
+#include "Game/SpikeRules.h"
 #include "SpikeBase.generated.h"
 
 class AGameStateBase;
@@ -21,53 +22,6 @@ enum class ESpikeState : uint8
 	Planted,
 	Defused,
 	Detonated,
-};
-
-UENUM(BlueprintType)
-enum class ESpikeInteraction : uint8
-{
-	None,
-	Planting,
-	Defusing,
-};
-
-/**
- * A hold-to-complete interaction expressed purely as timestamps: clients compute the progress
- * bar locally, the server replicates only on start/stop (zero bytes while the bar fills).
- */
-USTRUCT(BlueprintType)
-struct FSpikeInteractionState
-{
-	GENERATED_BODY()
-
-	UPROPERTY(BlueprintReadOnly)
-	ESpikeInteraction Type = ESpikeInteraction::None;
-
-	UPROPERTY(BlueprintReadOnly)
-	TObjectPtr<ATacticalCharacter> Interactor;
-
-	UPROPERTY(BlueprintReadOnly)
-	double StartServerTime = 0.0;
-
-	/** Seconds from StartServerTime to completion (already reduced by a defuse checkpoint). */
-	UPROPERTY(BlueprintReadOnly)
-	float Duration = 0.f;
-
-	/** Normalized progress at StartServerTime (0, or the 0.5 defuse checkpoint). */
-	UPROPERTY(BlueprintReadOnly)
-	float StartProgress = 0.f;
-
-	double GetCompletionTime() const { return StartServerTime + Duration; }
-
-	float GetProgress(double ServerNow) const
-	{
-		if (Type == ESpikeInteraction::None || Duration <= 0.f)
-		{
-			return StartProgress;
-		}
-		const float Alpha = FMath::Clamp(static_cast<float>((ServerNow - StartServerTime) / Duration), 0.f, 1.f);
-		return StartProgress + (1.f - StartProgress) * Alpha;
-	}
 };
 
 /**

@@ -9,6 +9,7 @@
 #include "Game/TacticalPlayerState.h"
 #include "Game/SpikeBase.h"
 #include "Net/FogOfWarSubsystem.h"
+#include "Net/FogOfWarRules.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -482,14 +483,8 @@ void ATacticalCharacter::ReportNoise(float Radius)
 	{
 		return;
 	}
-	// A quieter noise (footsteps) must not shrink a louder one (gunshot) the fog still remembers.
-	const double Now = GetWorld()->GetTimeSeconds();
-	const bool bLouderNoiseExpired = (Now - LastNoiseTime) > GetDefault<UTacticalFogOfWarSettings>()->NoiseMemoryTime;
-	if (bLouderNoiseExpired || Radius >= LastNoiseRadius)
-	{
-		LastNoiseRadius = Radius;
-		LastNoiseTime = Now;
-	}
+	FogOfWarRules::AccumulateNoise(LastNoiseTime, LastNoiseRadius, GetWorld()->GetTimeSeconds(), Radius,
+		GetDefault<UTacticalFogOfWarSettings>()->NoiseMemoryTime);
 }
 
 void ATacticalCharacter::Landed(const FHitResult& Hit)
