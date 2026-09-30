@@ -5,6 +5,7 @@
 
 #if WITH_EDITOR
 #include "Misc/DataValidation.h"
+#include "Weapons/TacticalWeapon.h" // TSubclassOf<ATacticalWeapon> checks need the complete type.
 #endif
 
 #define LOCTEXT_NAMESPACE "WeaponStats"

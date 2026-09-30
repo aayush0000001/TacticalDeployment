@@ -14,8 +14,9 @@
 #include "Weapons/TacticalWeapon.h"
 
 #if UE_WITH_IRIS
+#include "Iris/ReplicationSystem/Filtering/NetObjectFilter.h"
+#include "Iris/ReplicationSystem/ObjectReplicationBridge.h"
 #include "Iris/ReplicationSystem/ReplicationSystem.h"
-#include "Misc/EngineVersionComparison.h"
 #include "Net/Iris/ReplicationSystem/ReplicationSystemUtil.h"
 #endif
 
@@ -322,8 +323,8 @@ void UTacticalFogOfWarSubsystem::Tick(float DeltaTime)
 }
 
 // ---------------------------------------------------------------------------------------
-// Iris exclusion groups. All Iris API usage is isolated here: group-creation signatures have
-// shifted between engine minor versions (5.4 CreateGroup() vs. named groups in later versions).
+// Iris exclusion groups. All Iris API usage is isolated here: it still changes between engine
+// versions (named groups arrived in 5.5, connection handles in 5.6).
 // ---------------------------------------------------------------------------------------
 
 #if UE_WITH_IRIS
@@ -359,7 +360,8 @@ void UTacticalFogOfWarSubsystem::SyncIrisGroups()
 		}
 
 		UReplicationSystem* ReplicationSystem = FReplicationSystemUtil::GetReplicationSystem(Character);
-		const FNetRefHandle CharacterHandle = FReplicationSystemUtil::GetNetRefHandle(Character);
+		const UObjectReplicationBridge* Bridge = ReplicationSystem ? ReplicationSystem->GetReplicationBridge() : nullptr;
+		const FNetRefHandle CharacterHandle = Bridge ? Bridge->GetReplicatedRefHandle(Character) : FNetRefHandle();
 		if (!ReplicationSystem || !CharacterHandle.IsValid())
 		{
 			continue; // Not replicating yet (or Iris disabled at runtime): retry next frame.
@@ -367,11 +369,7 @@ void UTacticalFogOfWarSubsystem::SyncIrisGroups()
 
 		if (!Tracked.Group.IsValid())
 		{
-#if UE_VERSION_OLDER_THAN(5, 5, 0)
-			Tracked.Group = ReplicationSystem->CreateGroup();
-#else
 			Tracked.Group = ReplicationSystem->CreateGroup(*FString::Printf(TEXT("FogOfWar_%s"), *Character->GetName()));
-#endif
 			ReplicationSystem->AddExclusionFilterGroup(Tracked.Group);
 		}
 
@@ -381,7 +379,7 @@ void UTacticalFogOfWarSubsystem::SyncIrisGroups()
 		bool bAllResolved = true;
 		auto AddMember = [&](const UObject* Object)
 		{
-			const FNetRefHandle Handle = FReplicationSystemUtil::GetNetRefHandle(Object);
+			const FNetRefHandle Handle = Bridge->GetReplicatedRefHandle(Object);
 			if (Handle.IsValid())
 			{
 				Desired.AddUnique(Handle);
@@ -448,7 +446,7 @@ void UTacticalFogOfWarSubsystem::PushIrisFilterStatus()
 		{
 			FConnectionState& Connection = Connections.AddDefaulted_GetRef();
 			Connection.PlayerController = PC;
-			Connection.ConnectionId = NetConnection->GetConnectionId();
+			Connection.ConnectionId = NetConnection->GetConnectionHandle().GetParentConnectionId(); // Iris filters per parent connection.
 			Connection.Applied.Init(false, MaxSlots);
 			Connection.Known.Init(false, MaxSlots);
 		}

@@ -20,7 +20,7 @@ public class TacticalDeployment : ModuleRules
 			"DeveloperSettings", // UTacticalFogOfWarSettings is in a public header
 		});
 
-		// Adds IrisCore and defines UE_WITH_IRIS when the target enables bUseIris.
+		// Adds IrisCore and defines UE_WITH_IRIS (always 1: Iris is always compiled in on 5.8).
 		SetupIrisSupport(Target);
 	}
 }

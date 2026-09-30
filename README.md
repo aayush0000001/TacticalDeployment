@@ -1,6 +1,6 @@
 # TacticalDeployment
 
-C++ architecture for a 5v5, round-based tactical FPS in **Unreal Engine 5.4+**. It has no abilities: gunplay, deterministic movement, and a spike (bomb) objective.
+C++ architecture for a 5v5, round-based tactical FPS in **Unreal Engine 5.8**. It has no abilities: gunplay, deterministic movement, and a spike (bomb) objective.
 
 - Authoritative **128-tick** dedicated server (7.8125 ms frame budget)
 - **Iris** replication with push-model properties throughout
@@ -27,7 +27,7 @@ Read **[Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md)** for the full design, the p
 
 ## Verification
 
-No Unreal Engine install is available where this was built, so the game rules are verified in a headless simulation. The harness compiles the real rule headers and `WeaponStats.cpp` against a thin UE-core stand-in and plays 53 scenarios in a virtual world: corner peeks under latency, headshots on strafing targets, wallbangs, fire-rate cheats, counter-strafing, spike races and 1000 full matches. A static checker covers the UE-bound wiring (RPCs, replication registration, push-model dirtiness).
+The editor target compiles against UE 5.8.3 with no warnings, and the module loads in a headless editor. The game rules are verified in a headless simulation: the harness compiles the real rule headers and `WeaponStats.cpp` against a thin UE-core stand-in and plays 53 scenarios in a virtual world: corner peeks under latency, headshots on strafing targets, wallbangs, fire-rate cheats, counter-strafing, spike races and 1000 full matches. A static checker covers the UE-bound wiring (RPCs, replication registration, push-model dirtiness).
 
 ```
 cmake -S Tools/Simulation -B Tools/Simulation/Build -DCMAKE_BUILD_TYPE=Release
@@ -37,4 +37,4 @@ python3 Tools/Lint/check_unreal_conventions.py
 
 Results, the defects the simulation found (and which are fixed) and what it cannot cover are in [Docs/ARCHITECTURE.md, section 10](Docs/ARCHITECTURE.md#10-verification-headless-simulation).
 
-> The UE-bound classes (actors, components, RPCs, Iris) have not been compiled against an engine install yet, and no content (meshes, Blueprints, maps) is included. See *Known gaps* in the architecture doc.
+> The UE-bound classes (actors, components, RPCs, Iris) compile against UE 5.8 but have not been played in a networked match yet, and no content (meshes, Blueprints, maps) is included. See *Known gaps* in the architecture doc.

@@ -7,12 +7,12 @@ public class TacticalDeploymentTarget : TargetRules
 	public TacticalDeploymentTarget(TargetInfo Target) : base(Target)
 	{
 		Type = TargetType.Game;
-		DefaultBuildSettings = BuildSettingsVersion.V5;
-		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
+		DefaultBuildSettings = BuildSettingsVersion.V7;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;
 
-		// Iris replication + push-model dirtiness for every replicated property we own.
-		bUseIris = true;
-		bWithPushModel = true;
+		// No bWithPushModel here: installed engines reject it for Game targets (they share
+		// UnrealGame's build environment), and push model only saves work on the sending side,
+		// which is the dedicated server (TacticalDeploymentServer.Target.cs enables it).
 
 		ExtraModuleNames.Add("TacticalDeployment");
 	}

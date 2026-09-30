@@ -20,7 +20,6 @@
 #include "Engine/DamageEvents.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
-#include "Misc/EngineVersionComparison.h"
 #include "Net/UnrealNetwork.h"
 #include "Net/Core/PushModel/PushModel.h"
 
@@ -68,14 +67,12 @@ ATacticalCharacter::ATacticalCharacter(const FObjectInitializer& ObjectInitializ
 	// capsule so it can't poke through walls (Docs/ARCHITECTURE.md, Pillar 6).
 	Mesh1P->SetRelativeLocation(FVector(-15.f, 0.f, -75.f));
 	Mesh1P->SetRelativeScale3D(FVector(0.5f));
-#if !UE_VERSION_OLDER_THAN(5, 6, 0)
 	// Engine-native first-person rendering: separate FOV/scale for the viewmodel.
 	Mesh1P->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
 	FirstPersonCamera->bEnableFirstPersonFieldOfView = true;
 	FirstPersonCamera->bEnableFirstPersonScale = true;
 	FirstPersonCamera->FirstPersonFieldOfView = 74.f;
 	FirstPersonCamera->FirstPersonScale = 0.6f;
-#endif
 
 	// --- Mesh3P: full body, everyone but the owner --------------------------------------------
 	USkeletalMeshComponent* Mesh3P = GetMesh();
@@ -90,23 +87,15 @@ ATacticalCharacter::ATacticalCharacter(const FObjectInitializer& ObjectInitializ
 	Mesh3P->bUpdateOverlapsOnAnimationFinalize = false;
 	Mesh3P->SetRelativeLocation(FVector(0.f, 0.f, -88.f));
 	Mesh3P->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));
-#if !UE_VERSION_OLDER_THAN(5, 6, 0)
 	Mesh3P->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::WorldSpaceRepresentation;
-#endif
 
 	// --- Replication ----------------------------------------------------------------------------
 	bReplicates = true;
 	SetReplicatingMovement(true);
 	// Tactical maps are ~150 m across: distance culling is meaningless, occlusion culling (fog) is not.
-#if UE_VERSION_OLDER_THAN(5, 5, 0)
-	NetCullDistanceSquared = FMath::Square(1000.f * 100.f);
-	NetUpdateFrequency = TacticalNet::ServerTickRate;
-	MinNetUpdateFrequency = TacticalNet::ServerTickRate * 0.5f;
-#else
 	SetNetCullDistanceSquared(FMath::Square(1000.f * 100.f));
 	SetNetUpdateFrequency(TacticalNet::ServerTickRate);
 	SetMinNetUpdateFrequency(TacticalNet::ServerTickRate * 0.5f);
-#endif
 	NetPriority = 3.f;
 
 	// Default FRepMovement packs rotation into bytes (1.4 deg): far too coarse for yaw that

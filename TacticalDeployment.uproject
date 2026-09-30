@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "5.4",
+	"EngineAssociation": "5.8",
 	"Category": "",
 	"Description": "5v5 round-based tactical shooter. Authoritative 128-tick dedicated server, Iris replication.",
 	"Modules": [

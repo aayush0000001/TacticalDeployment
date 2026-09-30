@@ -1,18 +1,13 @@
 // Copyright TacticalDeployment. All Rights Reserved.
 
 #include "Game/TacticalPlayerState.h"
-#include "Misc/EngineVersionComparison.h"
 #include "Net/UnrealNetwork.h"
 #include "Net/Core/PushModel/PushModel.h"
 
 ATacticalPlayerState::ATacticalPlayerState()
 {
 	// Scoreboard data: no need to spend 128 Hz on it.
-#if UE_VERSION_OLDER_THAN(5, 5, 0)
-	NetUpdateFrequency = 10.f;
-#else
 	SetNetUpdateFrequency(10.f);
-#endif
 }
 
 void ATacticalPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const

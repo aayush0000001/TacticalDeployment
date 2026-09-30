@@ -1,9 +1,9 @@
 # TacticalDeployment: System Architecture
 
 A 5v5, round-based tactical FPS with no abilities: gunplay, deterministic movement, and a spike (bomb) objective.
-Target: **Unreal Engine 5.4+**, **authoritative dedicated server at 128 Hz** (7.8125 ms frame budget), **Iris** replication with push-model properties.
+Target: **Unreal Engine 5.8**, **authoritative dedicated server at 128 Hz** (7.8125 ms frame budget), **Iris** replication with push-model properties.
 
-> Status: the C++ architecture and core implementation. All game rules (hit registration, rewind, wallbangs, spray, spread, fire-rate gate, fog-of-war decisions, movement tuning, tagging, spike, round flow) plus the presentation math (viewmodel springs, HUD) are compiled and exercised by a headless simulation harness, 53 scenarios, all passing (see [Verification](#10-verification-headless-simulation)). The UE-bound classes (actors, components, RPCs, Iris) have **not** been compiled against an engine install yet; a static checker covers their Unreal wiring. Blueprints, meshes, AnimBPs, input assets and maps still need to be authored. See [Integration checklist](#integration-checklist) and [Known gaps](#known-gaps).
+> Status: the C++ architecture and core implementation. All game rules (hit registration, rewind, wallbangs, spray, spread, fire-rate gate, fog-of-war decisions, movement tuning, tagging, spike, round flow) plus the presentation math (viewmodel springs, HUD) are compiled and exercised by a headless simulation harness, 53 scenarios, all passing (see [Verification](#10-verification-headless-simulation)). The UE-bound classes (actors, components, RPCs, Iris) compile against UE 5.8.3 with no warnings and load in the editor, but have **not** been played in a networked match yet; a static checker covers their Unreal wiring. Blueprints, meshes, AnimBPs, input assets and maps still need to be authored. See [Integration checklist](#integration-checklist) and [Known gaps](#known-gaps).
 
 ---
 
@@ -133,8 +133,8 @@ Headroom for GC and hitches is ~3 ms. Configure incremental GC (`gc.IncrementalB
 
 - **128 Hz:** `[/Script/OnlineSubsystemUtils.IpNetDriver] NetServerMaxTickRate=128` caps the dedicated server's frame rate (`UGameEngine::GetMaxTickRate`). `bUseFixedFrameRate` stays off: a fixed delta makes server time drift from wall time during hitches, which would corrupt lag-compensation timestamps.
 - **Clients send moves at 128 Hz:** `ClientNetSendMoveDeltaTime=0.0078125`.
-- **Iris:** `bUseIris = true` in every `.Target.cs` compiles it in. `net.Iris.UseIrisReplication=1` plus `IrisNetDriverConfigs` turn it on at runtime. `net.SubObjects.DefaultUseSubObjectReplicationList=1` is required by Iris.
-- **Push model:** `bWithPushModel = true` plus `net.IsPushModelEnabled=1`. Every property we own is `bIsPushBased` and marked dirty explicitly.
+- **Iris:** always compiled in on 5.8 (`SetupIrisSupport` in the module's `Build.cs` adds IrisCore). `net.Iris.UseIrisReplication=1` plus `IrisNetDriverConfigs` turn it on at runtime. `net.SubObjects.DefaultUseSubObjectReplicationList=1` is required by Iris.
+- **Push model:** `bWithPushModel = true` in the Editor and Server targets (installed engines reject it for Game targets, and clients do not need it) plus `net.IsPushModelEnabled=1`. Every property we own is `bIsPushBased` and marked dirty explicitly.
 - **Poll rates:** `+PollConfigs` polls characters and weapons at 128 Hz and the spike at 32 Hz. Characters have their spatial grid filter disabled because the fog of war replaces it.
 - **Anti-speedhack:** `bMovementTimeDiscrepancyDetection/Resolution` in `[/Script/Engine.GameNetworkManager]`.
 - **Channels:** `WeaponTrace` (hitscan vs. world; capsules and meshes ignore it), `FogOcclusion` (LOS vs. world), `SpawnBarrier` (object type that blocks only pawns).
@@ -167,7 +167,7 @@ Each server frame, half of the ordered (viewer, enemy) pairs are evaluated (`Eva
 **Two output paths, one decision:**
 
 - **Legacy replication / ReplicationGraph:** `ATacticalCharacter::IsNetRelevantFor` asks `IsRelevantTo()`. Weapons use `bNetUseOwnerRelevancy`. The spike forwards to its carrier while carried. `RelevantTimeout=1.0` limits how long a culled channel lingers.
-- **Iris:** Iris does not call `IsNetRelevantFor`. Each character gets an **exclusion group** containing the character, its weapons, and the spike while carried. The subsystem calls `SetGroupFilterStatus(Group, ConnectionId, Allow|Disallow)`, and only when a (connection, target) bit changes, so the steady-state cost is zero. All Iris calls are isolated at the bottom of `FogOfWarSubsystem.cpp` because group-creation signatures differ between engine minor versions.
+- **Iris:** Iris does not call `IsNetRelevantFor`. Each character gets an **exclusion group** containing the character, its weapons, and the spike while carried. The subsystem calls `SetGroupFilterStatus(Group, ConnectionId, Allow|Disallow)`, and only when a (connection, target) bit changes, so the steady-state cost is zero. All Iris calls are isolated at the bottom of `FogOfWarSubsystem.cpp` because the Iris API still changes between engine versions.
 
 **Trade-off:** culling destroys the actor on that client and re-reveal re-sends its initial state (~150-250 bytes). The grace window and lookahead keep this to a few events per engagement. To avoid spawn hitches on reveal, keep character assets resident; never async-load a skeletal mesh during a reveal.
 
@@ -274,7 +274,7 @@ Reference densities: glass 0.1, drywall 0.4, wood 0.6, concrete 2.0, sheet metal
 
 ### Why a customized CMC rather than Mover (for now)
 
-In UE 5.4 the Mover plugin is experimental, and its rollback path (Network Prediction plugin) has no production track record at 128 Hz with 10 players. The CMC's prediction and reconciliation is proven, and everything competitive can be layered on it deterministically. The design is ready to move to Mover (see below).
+In UE 5.8 the Mover plugin is still experimental, and its rollback path (Network Prediction plugin) has no production track record at 128 Hz with 10 players. The CMC's prediction and reconciliation is proven, and everything competitive can be layered on it deterministically. The design is ready to move to Mover (see below).
 
 ### Snappy ground model (`UTacticalCharacterMovementComponent`)
 
@@ -366,7 +366,7 @@ stateDiagram-v2
 | `Mesh1P` (arms) + `WeaponMesh1P` | Camera | `bOnlyOwnerSee`, no shadows | Only ticks when rendered, so it costs the server and other clients nothing. |
 | `Mesh3P` (`ACharacter::Mesh`) + `WeaponMesh3P` | Capsule | `bOwnerNoSee`, `bCastHiddenShadow` | Drives server hitboxes and what everyone else sees. |
 
-**Anti-clipping:** `Mesh1P` is scaled to 0.5 and pulled in toward the camera, which gives the same screen footprint while physically staying inside the capsule, so it can't poke through walls. `NearClipPlane=2.0`. On engines that ship First Person Rendering, the constructor also enables `FirstPersonPrimitiveType`, `bEnableFirstPersonFieldOfView` and `bEnableFirstPersonScale` (guarded by `UE_VERSION_OLDER_THAN(5, 6, 0)`).
+**Anti-clipping:** `Mesh1P` is scaled to 0.5 and pulled in toward the camera, which gives the same screen footprint while physically staying inside the capsule, so it can't poke through walls. `NearClipPlane=2.0`. The constructor also enables the engine's first-person rendering: `FirstPersonPrimitiveType`, `bEnableFirstPersonFieldOfView` and `bEnableFirstPersonScale`.
 
 ### Syncing 3P aim with the 1P camera
 
@@ -391,7 +391,7 @@ stateDiagram-v2
 
 ## 10. Verification (headless simulation)
 
-No Unreal Engine install is available where this was built, so verification has two parts.
+The editor target compiles against UE 5.8.3 with no warnings, both as a unity build and with `-DisableUnity -NoPCH -NoSharedPCH`, and the module loads in a headless editor (`UnrealEditor-Cmd` with `-nullrhi`). The game rules and wiring are verified in two further parts.
 
 **`Tools/Simulation`** compiles the project's real engine-light headers and `WeaponStats.cpp` against a thin stand-in for UE core types (`Shim/CoreMinimal.h`: vectors, rotators, quaternions, `FMath`, `FRandomStream`, `TArray`, reflection macros stubbed out). It then runs scenario tests in a virtual world: box geometry with UE-like trace semantics, a 13-piece hitbox rig, a latency and jitter network model, and a model of the CMC's walking physics.
 
@@ -433,7 +433,7 @@ python3 Tools/Lint/check_unreal_conventions.py
 6. *`FMath::ClampAngle` called with mixed float/double arguments*, which UE's template may reject. Fixed.
 7. Doc numbers (counter-strafe 45 ms / release 200 ms) replaced with measured values.
 
-**What this does not verify:** that the UE-bound classes compile against a real engine (Iris API names and `UE_VERSION` guards in particular), real animation-driven hitboxes, the actual smoothing delay of CMC Linear smoothing (calibrate `ProxyInterpolationDelay` in-engine, since the margin is about +/-10 ms), and performance under the 7.8125 ms budget.
+**What this does not verify:** the UE-bound classes at runtime in a networked match (Iris exclusion-group filtering in particular), real animation-driven hitboxes, the actual smoothing delay of CMC Linear smoothing (calibrate `ProxyInterpolationDelay` in-engine, since the margin is about +/-10 ms), and performance under the 7.8125 ms budget.
 
 ## 11. Presentation, graphics and client performance
 
@@ -488,7 +488,7 @@ The game is playable with zero UI assets:
 4. Map: place `APlayerStart`s tagged `Attackers`/`Defenders`, `ASpikeSiteVolume`s, and `ATacticalSpawnBarrier`s.
 5. `BP_TacticalGameMode`: set `DefaultPawnClass`, `SpikeClass`, `DefaultSidearm` and `ShopCatalog`.
 6. Register `WeaponStats` as a Primary Asset Type in Asset Manager settings.
-7. Build the `TacticalDeploymentServer` target and verify with `stat Tactical`, `stat net`, and `net.Iris.*` debug cvars under emulated latency (`NetEmulation.PktLag=60`, `PktLagVariance=10`, `PktLoss=1`).
+7. Build the `TacticalDeploymentServer` target (needs a source-built engine) and verify with `stat Tactical`, `stat net`, and `net.Iris.*` debug cvars under emulated latency (`NetEmulation.PktLag=60`, `PktLagVariance=10`, `PktLoss=1`).
 8. Calibrate `TacticalNet::ProxyInterpolationDelay` against measured proxy display lag. The simulation shows about +/-10 ms of margin before headshots on strafing targets start to miss.
 9. Keep `Tools/Simulation` and `Tools/Lint` green on every change (both run in seconds).
 10. Create the enemy-outline MPC and post-process material (section 11) and assign them to `ATacticalHUD`.
@@ -496,7 +496,7 @@ The game is playable with zero UI assets:
 
 ## Known gaps
 
-- The UE-bound classes have not been compiled against an engine yet (the rules they call are compiled and tested). The Iris exclusion-group calls, `UNetConnection::GetConnectionId` and the `UE_VERSION` guards are the most likely points to need small adjustments per engine minor version.
+- The UE-bound classes compile against UE 5.8.3 and load in the editor, but have not been played in a networked match yet (the rules they call are compiled and tested). Iris exclusion-group filtering is the first thing to check at runtime.
 - Survivors do not keep their loadout between rounds, and there is no weapon drop or pickup (only the spike drops).
 - No overtime side alternation, no pistol-round economy rules, no minimap data channel.
 - In-engine automation tests (`IMPLEMENT_SIMPLE_AUTOMATION_TEST` / Gauntlet) are not written yet. The simulation scenarios port directly, because they call the same rule functions.
