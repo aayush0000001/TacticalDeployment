@@ -154,6 +154,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0", ClampMax = "1"))
 	float CameraKickFraction = 0.35f;
 
+	/** Strength of the procedural viewmodel kick per shot (cosmetic; 1 = rifle). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0", ClampMax = "4"))
+	float ViewmodelKick = 1.f;
+
 	// --- Spread (conditional accuracy) ------------------------------------------------
 
 	/** Cone half-angle (degrees) when standing still, first shot. 0 = pinpoint first-shot accuracy. */

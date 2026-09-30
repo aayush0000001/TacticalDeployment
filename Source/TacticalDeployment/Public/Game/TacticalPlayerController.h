@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerController.h"
 #include "Core/ClockSync.h"
+#include "Core/TacticalTypes.h"
 #include "TacticalPlayerController.generated.h"
 
 class UWeaponStats;
@@ -32,6 +33,22 @@ public:
 
 	float GetSmoothedRoundTripTime() const { return static_cast<float>(ClockSync.GetSmoothedRoundTrip()); }
 
+	/** Latest confirmed hit by this player's own shots (drives the HUD hit marker). */
+	struct FHitFeedback
+	{
+		double Time = -1.0e9;
+		EHitZone Zone = EHitZone::None;
+		float Damage = 0.f;
+		bool bKill = false;
+		bool bWallbang = false;
+	};
+
+	const FHitFeedback& GetLastHitFeedback() const { return LastHit; }
+
+	/** Server -> shooter only. Unreliable: a lost marker is harmless, a stalled reliable queue is not. */
+	UFUNCTION(Client, Unreliable)
+	void Client_HitConfirmed(EHitZone Zone, uint8 Damage, bool bKilled, bool bWallbang);
+
 	UFUNCTION(Server, Reliable)
 	void Server_PurchaseWeapon(const UWeaponStats* Weapon);
 
@@ -56,6 +73,8 @@ protected:
 	float TimeSyncInterval = 0.5f;
 
 	FTacticalClockSync ClockSync;
+
+	FHitFeedback LastHit;
 
 	FTimerHandle TimeSyncTimer;
 };

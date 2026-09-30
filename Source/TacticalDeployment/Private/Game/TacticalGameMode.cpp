@@ -7,6 +7,7 @@
 #include "Game/TacticalGameState.h"
 #include "Game/TacticalPlayerController.h"
 #include "Game/TacticalPlayerState.h"
+#include "UI/TacticalHUD.h"
 #include "Weapons/WeaponStats.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerStart.h"
@@ -24,6 +25,7 @@ ATacticalGameMode::ATacticalGameMode()
 	PlayerStateClass = ATacticalPlayerState::StaticClass();
 	PlayerControllerClass = ATacticalPlayerController::StaticClass();
 	DefaultPawnClass = ATacticalCharacter::StaticClass(); // Override with the character Blueprint.
+	HUDClass = ATacticalHUD::StaticClass();
 	bStartPlayersAsSpectators = false;
 }
 
@@ -156,6 +158,17 @@ void ATacticalGameMode::OnCharacterKilled(ATacticalCharacter* Victim, AControlle
 	{
 		KillerPS->ServerAddKill();
 		KillerPS->ServerAddCredits(KillCredits);
+	}
+
+	if (Victim)
+	{
+		FKillFeedEntry Entry;
+		Entry.Killer = KillerPS;
+		Entry.Victim = Victim->GetPlayerState();
+		Entry.Weapon = Victim->GetLastDamageWeapon();
+		Entry.bHeadshot = Victim->GetLastDamageZone() == EHitZone::Head;
+		Entry.bWallbang = Victim->WasLastDamageWallbang();
+		GetTacticalGameState()->Multicast_KillFeed(Entry);
 	}
 
 	CheckEliminationWin();

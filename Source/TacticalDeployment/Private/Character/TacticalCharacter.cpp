@@ -2,6 +2,8 @@
 
 #include "Character/TacticalCharacter.h"
 #include "Character/TacticalCharacterMovementComponent.h"
+#include "Character/TacticalMovementTuning.h"
+#include "Core/TacticalGameUserSettings.h"
 #include "Weapons/TacticalWeapon.h"
 #include "Weapons/WeaponStats.h"
 #include "Game/TacticalGameMode.h"
@@ -59,6 +61,7 @@ ATacticalCharacter::ATacticalCharacter(const FObjectInitializer& ObjectInitializ
 	Mesh1P->CastShadow = false;
 	Mesh1P->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Mesh1P->SetCollisionResponseToAllChannels(ECR_Ignore);
+	Mesh1P->SetGenerateOverlapEvents(false);
 	// Only the owner ever renders it; nobody else (server included) should pay for its animation.
 	Mesh1P->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
 	// Pulled toward the camera + scaled down: same screen footprint, but physically inside the
@@ -78,8 +81,13 @@ ATacticalCharacter::ATacticalCharacter(const FObjectInitializer& ObjectInitializ
 	USkeletalMeshComponent* Mesh3P = GetMesh();
 	Mesh3P->SetOwnerNoSee(true);
 	Mesh3P->bCastHiddenShadow = true; // Owner still sees their own shadow.
+	// No physics state while alive: bullets use analytic lag-compensated hitboxes, so the mesh's
+	// physics bodies would only cost kinematic updates every frame. Ragdoll re-enables it on death.
+	Mesh3P->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Mesh3P->SetCollisionResponseToChannel(TacticalCollision::WeaponTrace, ECR_Ignore);
 	Mesh3P->SetCollisionResponseToChannel(TacticalCollision::FogOcclusion, ECR_Ignore);
+	Mesh3P->SetGenerateOverlapEvents(false);
+	Mesh3P->bUpdateOverlapsOnAnimationFinalize = false;
 	Mesh3P->SetRelativeLocation(FVector(0.f, 0.f, -88.f));
 	Mesh3P->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));
 #if !UE_VERSION_OLDER_THAN(5, 6, 0)
@@ -124,6 +132,7 @@ void ATacticalCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
 	Params.Condition = COND_None;
 	DOREPLIFETIME_WITH_PARAMS_FAST(ATacticalCharacter, CurrentWeapon, Params);
 	DOREPLIFETIME_WITH_PARAMS_FAST(ATacticalCharacter, bIsDead, Params);
+	DOREPLIFETIME_WITH_PARAMS_FAST(ATacticalCharacter, DeathInfo, Params);
 
 	Params.Condition = COND_SkipOwner;
 	DOREPLIFETIME_WITH_PARAMS_FAST(ATacticalCharacter, ReplicatedAimPitch, Params);
@@ -146,6 +155,9 @@ void ATacticalCharacter::PostInitializeComponents()
 		USkeletalMeshComponent* Mesh3P = GetMesh();
 		Mesh3P->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
 		Mesh3P->bEnableUpdateRateOptimizations = false; // URO would skip frames: hitboxes must be exact.
+		// The server never ragdolls and never simulates the mesh: skip all physics bookkeeping.
+		Mesh3P->bEnablePhysicsOnDedicatedServer = false;
+		Mesh3P->KinematicBonesUpdateType = EKinematicBonesUpdateToPhysics::SkipAllBones;
 		Mesh1P->SetComponentTickEnabled(false);
 	}
 }
@@ -153,6 +165,9 @@ void ATacticalCharacter::PostInitializeComponents()
 void ATacticalCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+
+	Mesh1PBaseLocation = Mesh1P->GetRelativeLocation();
+	Mesh1PBaseRotation = Mesh1P->GetRelativeRotation();
 
 	if (HasAuthority())
 	{
@@ -228,7 +243,69 @@ void ATacticalCharacter::Tick(float DeltaSeconds)
 		// Visual kick chases the latest pattern offset, and relaxes back once the spray stops.
 		ViewKickTarget = FMath::RInterpTo(ViewKickTarget, FRotator::ZeroRotator, DeltaSeconds, 6.f);
 		ViewKick = FMath::RInterpTo(ViewKick, ViewKickTarget, DeltaSeconds, 30.f);
+
+		UpdateViewmodel(DeltaSeconds);
 	}
+
+	if (!bTeamHighlightApplied && GetNetMode() != NM_DedicatedServer)
+	{
+		UpdateTeamHighlight();
+	}
+}
+
+void ATacticalCharacter::UpdateViewmodel(float DeltaSeconds)
+{
+	if (DeltaSeconds <= 0.f || !IsAlive())
+	{
+		return;
+	}
+
+	// Look rate from the control rotation (never from the camera: the view kick must not feed back).
+	const FRotator Control = GetControlRotation();
+	FViewmodelMotionInput Input;
+	Input.DeltaTime = DeltaSeconds;
+	if (bHasLastControlRotation)
+	{
+		Input.LookYawRate = FRotator::NormalizeAxis(Control.Yaw - LastControlRotation.Yaw) / DeltaSeconds;
+		Input.LookPitchRate = FRotator::NormalizeAxis(Control.Pitch - LastControlRotation.Pitch) / DeltaSeconds;
+	}
+	LastControlRotation = Control;
+	bHasLastControlRotation = true;
+
+	Input.SpeedRatio = GetVelocity().Size2D() / TacticalMovementTuning::RunSpeed;
+	Input.bOnGround = GetCharacterMovement()->IsMovingOnGround();
+	ViewmodelMotion.Update(Input, ViewmodelSettings);
+
+	Mesh1P->SetRelativeLocationAndRotation(Mesh1PBaseLocation + ViewmodelMotion.GetLocationOffset(),
+		Mesh1PBaseRotation + ViewmodelMotion.GetRotationOffset());
+}
+
+void ATacticalCharacter::UpdateTeamHighlight()
+{
+	if (IsLocallyControlled())
+	{
+		bTeamHighlightApplied = true; // Never outline yourself.
+		return;
+	}
+
+	const APlayerController* LocalPC = GetWorld()->GetFirstPlayerController();
+	const ATacticalPlayerState* LocalState = LocalPC ? LocalPC->GetPlayerState<ATacticalPlayerState>() : nullptr;
+	if (!LocalState || !GetPlayerState())
+	{
+		return; // Retry next frame: PlayerStates replicate after pawns.
+	}
+
+	const bool bEnemy = GetTeam() != LocalState->GetTeam();
+	USkeletalMeshComponent* Mesh3P = GetMesh();
+	Mesh3P->SetRenderCustomDepth(true);
+	Mesh3P->SetCustomDepthStencilValue(bEnemy ? EnemyStencilValue : AllyStencilValue);
+	bTeamHighlightApplied = true;
+}
+
+void ATacticalCharacter::OnRep_PlayerState()
+{
+	Super::OnRep_PlayerState();
+	bTeamHighlightApplied = false; // Re-evaluate with the new team.
 }
 
 void ATacticalCharacter::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
@@ -326,13 +403,19 @@ void ATacticalCharacter::ServerSetArmor(float NewArmor)
 // Damage & tagging
 // ---------------------------------------------------------------------------------------
 
-void ATacticalCharacter::ApplyBulletDamage(float Damage, EHitZone Zone, const UWeaponStats* Weapon, AController* InstigatorController, AActor* DamageCauser)
+float ATacticalCharacter::ApplyBulletDamage(float Damage, EHitZone Zone, const UWeaponStats* Weapon, AController* InstigatorController, AActor* DamageCauser,
+	const FVector& ShotDirection, bool bWallbang)
 {
 	check(HasAuthority());
 	if (!IsAlive() || Damage <= 0.f)
 	{
-		return;
+		return 0.f;
 	}
+
+	LastDamageWeapon = Weapon;
+	LastDamageZone = Zone;
+	bLastDamageWallbang = bWallbang;
+	const float HealthBefore = Health;
 
 	// Armor soaks a fixed share until depleted.
 	const float Absorbed = FMath::Min(Armor, Damage * ArmorAbsorption);
@@ -348,10 +431,14 @@ void ATacticalCharacter::ApplyBulletDamage(float Damage, EHitZone Zone, const UW
 	UE_LOG(LogTacticalHitReg, Verbose, TEXT("%s hit %s zone=%d dmg=%.1f hp=%.1f"),
 		*GetNameSafe(InstigatorController), *GetName(), static_cast<int32>(Zone), Damage, Health);
 
+	const float Dealt = (HealthBefore - Health) + Absorbed;
 	if (Health <= 0.f)
 	{
+		DeathInfo.Direction = ShotDirection.GetSafeNormal();
+		DeathInfo.Zone = Zone;
+		MARK_PROPERTY_DIRTY_FROM_NAME(ATacticalCharacter, DeathInfo, this);
 		Die(InstigatorController);
-		return;
+		return Dealt;
 	}
 
 	if (Weapon)
@@ -365,6 +452,7 @@ void ATacticalCharacter::ApplyBulletDamage(float Damage, EHitZone Zone, const UW
 			Taggable->ApplyDamageTag(TagParams);
 		}
 	}
+	return Dealt;
 }
 
 float ATacticalCharacter::TakeDamage(float DamageAmount, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -373,10 +461,17 @@ float ATacticalCharacter::TakeDamage(float DamageAmount, FDamageEvent const& Dam
 	const float Actual = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 	if (HasAuthority() && IsAlive() && Actual > 0.f)
 	{
+		LastDamageWeapon = nullptr;
+		LastDamageZone = EHitZone::Body;
+		bLastDamageWallbang = false;
 		Health = FMath::Max(0.f, Health - Actual);
 		MARK_PROPERTY_DIRTY_FROM_NAME(ATacticalCharacter, Health, this);
 		if (Health <= 0.f)
 		{
+			// Blown away from the source (spike detonation).
+			DeathInfo.Direction = DamageCauser ? (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal() : FVector::ZeroVector;
+			DeathInfo.Zone = EHitZone::Body;
+			MARK_PROPERTY_DIRTY_FROM_NAME(ATacticalCharacter, DeathInfo, this);
 			Die(EventInstigator);
 		}
 	}
@@ -436,6 +531,7 @@ void ATacticalCharacter::OnRep_IsDead()
 		return;
 	}
 
+	const FVector InheritedVelocity = GetVelocity(); // Before movement is disabled.
 	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	GetCharacterMovement()->DisableMovement();
 	if (CurrentWeapon)
@@ -449,6 +545,13 @@ void ATacticalCharacter::OnRep_IsDead()
 		Mesh3P->SetOwnerNoSee(false); // Owner watches their own body from the death cam.
 		Mesh3P->SetCollisionProfileName(TEXT("Ragdoll"));
 		Mesh3P->SetSimulatePhysics(true);
+		Mesh3P->SetAllPhysicsLinearVelocity(InheritedVelocity);
+		const FVector Direction = FVector(DeathInfo.Direction);
+		if (!Direction.IsNearlyZero())
+		{
+			// Thrown along the killing shot from the bone that took it.
+			Mesh3P->AddImpulse(Direction * DeathImpulse, DeathInfo.Zone == EHitZone::Head ? HeadBoneName : BodyBoneName, /*bVelChange*/ true);
+		}
 		Mesh1P->SetHiddenInGame(true);
 	}
 }
@@ -489,6 +592,10 @@ void ATacticalCharacter::ReportNoise(float Radius)
 
 void ATacticalCharacter::Landed(const FHitResult& Hit)
 {
+	if (IsLocallyControlled())
+	{
+		ViewmodelMotion.AddLanding(FMath::Abs(GetVelocity().Z), ViewmodelSettings);
+	}
 	Super::Landed(Hit);
 	ReportNoise(LandingNoiseRadius);
 }
@@ -571,7 +678,9 @@ void ATacticalCharacter::Input_Move(const FInputActionValue& Value)
 
 void ATacticalCharacter::Input_Look(const FInputActionValue& Value)
 {
-	const FVector2D Axis = Value.Get<FVector2D>();
+	const UTacticalGameUserSettings* Settings = UTacticalGameUserSettings::Get();
+	const float Sensitivity = Settings ? Settings->MouseSensitivity : 1.f;
+	const FVector2D Axis = Value.Get<FVector2D>() * Sensitivity;
 	AddControllerYawInput(Axis.X);
 	AddControllerPitchInput(Axis.Y);
 }

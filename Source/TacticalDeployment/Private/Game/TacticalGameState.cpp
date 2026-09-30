@@ -4,6 +4,10 @@
 #include "Combat/LagCompensationComponent.h"
 #include "Game/RoundRules.h"
 #include "Game/SpikeBase.h"
+#include "Game/TacticalPlayerState.h"
+#include "Weapons/WeaponStats.h"
+#include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 #include "Net/UnrealNetwork.h"
 #include "Net/Core/PushModel/PushModel.h"
 
@@ -99,6 +103,38 @@ void ATacticalGameState::ServerSetSpike(ASpikeBase* InSpike)
 	check(HasAuthority());
 	Spike = InSpike;
 	MARK_PROPERTY_DIRTY_FROM_NAME(ATacticalGameState, Spike, this);
+}
+
+void ATacticalGameState::Multicast_KillFeed_Implementation(const FKillFeedEntry& Entry)
+{
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	const APlayerController* LocalPC = GetWorld()->GetFirstPlayerController();
+	const ATacticalPlayerState* LocalState = LocalPC ? LocalPC->GetPlayerState<ATacticalPlayerState>() : nullptr;
+	auto IsAlly = [LocalState](const APlayerState* PS)
+	{
+		const ATacticalPlayerState* Tactical = Cast<ATacticalPlayerState>(PS);
+		return LocalState && Tactical && Tactical->GetTeam() == LocalState->GetTeam();
+	};
+
+	FKillFeedLine& Line = RecentKills.AddDefaulted_GetRef();
+	Line.Killer = Entry.Killer ? Entry.Killer->GetPlayerName() : FString(TEXT("SPIKE"));
+	Line.Victim = Entry.Victim ? Entry.Victim->GetPlayerName() : FString();
+	Line.Weapon = Entry.Weapon ? Entry.Weapon->DisplayName.ToString() : FString(TEXT("SPIKE"));
+	Line.bKillerIsAlly = IsAlly(Entry.Killer);
+	Line.bVictimIsAlly = IsAlly(Entry.Victim);
+	Line.bHeadshot = Entry.bHeadshot;
+	Line.bWallbang = Entry.bWallbang;
+	Line.Time = GetWorld()->GetTimeSeconds();
+
+	constexpr int32 MaxLines = 8;
+	if (RecentKills.Num() > MaxLines)
+	{
+		RecentKills.RemoveAt(0, RecentKills.Num() - MaxLines);
+	}
 }
 
 void ATacticalGameState::OnRep_RoundState(const FTacticalRoundState& Previous)

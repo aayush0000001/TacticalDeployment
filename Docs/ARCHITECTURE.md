@@ -3,7 +3,7 @@
 A 5v5, round-based tactical FPS with no abilities: gunplay, deterministic movement, and a spike (bomb) objective.
 Target: **Unreal Engine 5.4+**, **authoritative dedicated server at 128 Hz** (7.8125 ms frame budget), **Iris** replication with push-model properties.
 
-> Status: the C++ architecture and core implementation. All game rules (hit registration, rewind, wallbangs, spray, spread, fire-rate gate, fog-of-war decisions, movement tuning, tagging, spike, round flow) are compiled and exercised by a headless simulation harness, 46 scenarios, all passing (see [Verification](#10-verification-headless-simulation)). The UE-bound classes (actors, components, RPCs, Iris) have **not** been compiled against an engine install yet; a static checker covers their Unreal wiring. Blueprints, meshes, AnimBPs, input assets and maps still need to be authored. See [Integration checklist](#integration-checklist) and [Known gaps](#known-gaps).
+> Status: the C++ architecture and core implementation. All game rules (hit registration, rewind, wallbangs, spray, spread, fire-rate gate, fog-of-war decisions, movement tuning, tagging, spike, round flow) plus the presentation math (viewmodel springs, HUD) are compiled and exercised by a headless simulation harness, 53 scenarios, all passing (see [Verification](#10-verification-headless-simulation)). The UE-bound classes (actors, components, RPCs, Iris) have **not** been compiled against an engine install yet; a static checker covers their Unreal wiring. Blueprints, meshes, AnimBPs, input assets and maps still need to be authored. See [Integration checklist](#integration-checklist) and [Known gaps](#known-gaps).
 
 ---
 
@@ -77,7 +77,12 @@ Source/TacticalDeployment/
   Public/Game/TacticalPlayerController.h clock sync (view time), shop RPCs
   Public/Character/TacticalCharacter.h   Pillar 6 - Mesh1P/Mesh3P, camera, relevancy, damage
   Public/Animation/TacticalAnimInstance.h  Pillar 6 - AimOffset inputs
-Tools/Simulation/                        headless harness: UE-core shim + 46 scenario tests
+  Public/Core/ViewmodelMotion.h          * exact critically damped springs: sway, bob, shot kick, landing dip
+  Public/Core/HudMath.h                  * spread-to-pixels (honest crosshair), fades, clocks
+  Public/Core/TacticalGameUserSettings.h player settings: sensitivity, crosshair, outline colour, low latency
+  Public/UI/TacticalHUD.h                asset-free Canvas HUD
+Config/DefaultScalability.ini            competitive scalability (quality never changes what you can see)
+Tools/Simulation/                        headless harness: UE-core shim + 53 scenario tests
 Tools/Lint/check_unreal_conventions.py   static checks for RPCs, replication and push-model wiring
 ```
 
@@ -430,6 +435,51 @@ python3 Tools/Lint/check_unreal_conventions.py
 
 **What this does not verify:** that the UE-bound classes compile against a real engine (Iris API names and `UE_VERSION` guards in particular), real animation-driven hitboxes, the actual smoothing delay of CMC Linear smoothing (calibrate `ProxyInterpolationDelay` in-engine, since the margin is about +/-10 ms), and performance under the 7.8125 ms budget.
 
+## 11. Presentation, graphics and client performance
+
+Everything here is cosmetic or client-side. None of it changes aim, hit registration or what the server replicates.
+
+### Viewmodel motion (`Core/ViewmodelMotion.h`, driven by `ATacticalCharacter::UpdateViewmodel`)
+
+`Mesh1P` is moved by six exact critically damped springs:
+- **Sway:** lags fast mouse movement, capped at 3.5 degrees.
+- **Bob:** a stride-synced figure-eight that scales with speed and is zero in the air.
+- **Shot kick:** a backward shove plus muzzle climb, scaled by `UWeaponStats::ViewmodelKick`.
+- **Landing dip:** scales with impact speed.
+
+The springs integrate the closed-form solution rather than Euler steps. The simulation shows the same state to within 0.01% from 30 to 360 FPS, and stability through 2-second hitches. A shot kick peaks at 2.1 cm and settles in 242 ms with no overshoot. The camera never moves: sway on the camera would move the crosshair away from where bullets go.
+
+### HUD (`UI/TacticalHUD.h`), drawn entirely with Canvas
+
+The game is playable with zero UI assets:
+- **Honest crosshair.** The line gap opens by exactly the screen radius of the current spread cone (`HudMath::SpreadToPixels`, checked against a pinhole projection). At 103 degrees FOV and 1920 px that is 1.3 px standing still, 21 px walking and 68 px running. Counter-strafe accuracy is therefore visible. The crosshair's colour, size, gap, outline, dot and dynamic spread are all player settings.
+- **Hit markers:** white for body, gold for head, red for a kill, dimmed for a wallbang. They come from `ATacticalPlayerController::Client_HitConfirmed`, an unreliable RPC sent to the shooter only.
+- **Round state:** scores (your team always on the left, in ally colour), the phase clock, attack/defend, and round won/lost. The clock is hidden after a plant, so the spike is timed by ear.
+- **Vitals:** health, armor, and ammo (turns red at 25% or less). Credits show only while the shop is open.
+- **Spike bar:** plant/defuse progress, with the 50% defuse checkpoint drawn as a tick that turns gold once banked.
+- **Kill feed:** `ATacticalGameState::Multicast_KillFeed`, unreliable, with headshot and wallbang tags. It contains no positions, so it can't leak what the fog of war hides.
+- **Net stats:** FPS and ping.
+
+### Visibility
+
+**Enemy outline.** On clients, `Mesh3P` renders custom depth with stencil 1 for enemies and 2 for allies (`r.CustomDepth=3`). Players choose the colour: red, or yellow and purple for colour-blind players. The HUD writes it into a Material Parameter Collection. **Artist step:** create an MPC with a vector parameter `EnemyHighlightColor`, and a post-process material that samples CustomStencil. Where stencil == 1, compare 4 neighbouring CustomDepth samples against the pixel's own; where they differ (silhouette edge), lerp SceneColor toward the MPC colour. Assign the MPC to `ATacticalHUD::HighlightParameters` and the material to a global post-process volume.
+
+**Rendering profile** (`DefaultEngine.ini`):
+- No motion blur, bloom or lens flare.
+- **Fixed exposure**, so a doorway is equally bright to both players with no eye-adaptation flash when peeking.
+- FXAA, because temporal AA leaves ghost trails behind strafing enemies.
+- Baked GI with SSR and CSM rather than Lumen/VSM, to hold 144-360 FPS on mid-range PCs.
+- Nanite for static geometry, and a GPU skin cache for characters.
+
+**Scalability** (`DefaultScalability.ini`) follows one rule: quality may change how pretty things are, never what you can see. View distance, skeletal LOD and dynamic character shadows are identical on every level, so Low is not an advantage.
+
+**Latency.** VSync is off by default and the frame rate uncapped. Low-latency mode sets `r.GTSyncType=1` (game thread waits for the RHI thread) and `r.OneFrameThreadLag=0`.
+
+### Physics and server CPU
+
+- **No physics state on character meshes while alive.** Hit registration uses analytic hitboxes, so the dedicated server's `Mesh3P` has no collision, `bEnablePhysicsOnDedicatedServer = false` and `KinematicBonesUpdateType = SkipAllBones`. There are also no animation-driven overlap updates. This removes a kinematic body sync for 10 skeletons every 7.8 ms frame.
+- **Directional death.** Ragdolls (client-only) inherit the character's velocity and get an impulse along the killing shot, at the head or chest bone depending on where it hit. That uses `FDeathInfo`, which replicates with `bIsDead`. Spike deaths are thrown away from the spike.
+
 ## Integration checklist
 
 1. Create `BP_TacticalCharacter` from `ATacticalCharacter`. Assign meshes (arms and body), the AnimBPs (both parented to `UTacticalAnimInstance`), the Enhanced Input assets, and the **hitbox list** (head sphere, neck, 3 spine capsules, pelvis, upper/lower arms, thighs, calves). Add a `spike_socket` to the body skeleton.
@@ -441,6 +491,8 @@ python3 Tools/Lint/check_unreal_conventions.py
 7. Build the `TacticalDeploymentServer` target and verify with `stat Tactical`, `stat net`, and `net.Iris.*` debug cvars under emulated latency (`NetEmulation.PktLag=60`, `PktLagVariance=10`, `PktLoss=1`).
 8. Calibrate `TacticalNet::ProxyInterpolationDelay` against measured proxy display lag. The simulation shows about +/-10 ms of margin before headshots on strafing targets start to miss.
 9. Keep `Tools/Simulation` and `Tools/Lint` green on every change (both run in seconds).
+10. Create the enemy-outline MPC and post-process material (section 11) and assign them to `ATacticalHUD`.
+11. Author lighting for fixed exposure (set the post-process volume's exposure compensation per map), and bake lighting.
 
 ## Known gaps
 
@@ -448,4 +500,5 @@ python3 Tools/Lint/check_unreal_conventions.py
 - Survivors do not keep their loadout between rounds, and there is no weapon drop or pickup (only the spike drops).
 - No overtime side alternation, no pistol-round economy rules, no minimap data channel.
 - In-engine automation tests (`IMPLEMENT_SIMPLE_AUTOMATION_TEST` / Gauntlet) are not written yet. The simulation scenarios port directly, because they call the same rule functions.
+- Presentation is code-only: no meshes, textures, materials, sounds or VFX are included. The HUD uses the engine's default fonts. Weapon world models are not outlined yet (only `Mesh3P`).
 - A hitch longer than one fire interval makes UE's looping timer fire twice in one frame. The server gate accepts only one of those shots, so client-predicted ammo can briefly read one low until the next ammo update.

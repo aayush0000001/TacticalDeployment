@@ -7,6 +7,8 @@
 #include "Character/TakeDamageTagging.h"
 #include "Combat/LagCompensationComponent.h"
 #include "Core/TacticalTypes.h"
+#include "Core/ViewmodelMotion.h"
+#include "Engine/NetSerialization.h"
 #include "TacticalCharacter.generated.h"
 
 class ATacticalCharacter;
@@ -17,6 +19,19 @@ class UTacticalCharacterMovementComponent;
 class ATacticalWeapon;
 class UWeaponStats;
 struct FInputActionValue;
+
+/** How the character died: replicated with bIsDead so clients can throw the ragdoll the right way. */
+USTRUCT()
+struct FDeathInfo
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FVector_NetQuantizeNormal Direction = FVector::ZeroVector;
+
+	UPROPERTY()
+	EHitZone Zone = EHitZone::None;
+};
 
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnTacticalCharacterDied, ATacticalCharacter* /*Victim*/, AController* /*Killer*/);
 
@@ -76,6 +91,13 @@ public:
 	/** Cosmetic view kick from recoil (owning client only, never touches ControlRotation). */
 	void SetViewKickTarget(const FRotator& Target) { ViewKickTarget = Target; }
 
+	/** Cosmetic viewmodel shove per shot (owning client only). */
+	void AddViewmodelKick(float Strength) { ViewmodelMotion.AddShotKick(Strength, ViewmodelSettings); }
+
+	/** Custom-depth stencil values read by the outline post-process material. */
+	static constexpr int32 EnemyStencilValue = 1;
+	static constexpr int32 AllyStencilValue = 2;
+
 	// --- Aim ----------------------------------------------------------------------------
 
 	/** Full-precision on the owner/server; 16-bit replicated pitch on simulated proxies. */
@@ -83,8 +105,14 @@ public:
 
 	// --- Damage -------------------------------------------------------------------------
 
-	/** Server only. Armor absorption, tagging, death. */
-	void ApplyBulletDamage(float Damage, EHitZone Zone, const UWeaponStats* Weapon, AController* InstigatorController, AActor* DamageCauser);
+	/** Server only. Armor absorption, tagging, death. Returns health + armor actually removed. */
+	float ApplyBulletDamage(float Damage, EHitZone Zone, const UWeaponStats* Weapon, AController* InstigatorController, AActor* DamageCauser,
+		const FVector& ShotDirection, bool bWallbang);
+
+	/** Server: what dealt the most recent damage (kill feed). */
+	const UWeaponStats* GetLastDamageWeapon() const { return LastDamageWeapon; }
+	EHitZone GetLastDamageZone() const { return LastDamageZone; }
+	bool WasLastDamageWallbang() const { return bLastDamageWallbang; }
 
 	virtual float TakeDamage(float DamageAmount, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
@@ -122,11 +150,18 @@ public:
 	virtual void PawnClientRestart() override;
 	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
 	virtual void Landed(const FHitResult& Hit) override;
+	virtual void OnRep_PlayerState() override;
 
 protected:
 	void Die(AController* Killer);
 
 	void EquipWeapon(ATacticalWeapon* Weapon);
+
+	/** Owning client: procedural sway/bob/kick on Mesh1P. */
+	void UpdateViewmodel(float DeltaSeconds);
+
+	/** Clients: tag Mesh3P for the enemy/ally outline once the local player's team is known. */
+	void UpdateTeamHighlight();
 
 	// Input handlers
 	void Input_Move(const FInputActionValue& Value);
@@ -228,13 +263,42 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_IsDead)
 	bool bIsDead = false;
 
+	UPROPERTY(Replicated)
+	FDeathInfo DeathInfo;
+
+	// --- Death presentation -------------------------------------------------------------
+
+	UPROPERTY(EditDefaultsOnly, Category = "Death")
+	FName HeadBoneName = TEXT("head");
+
+	UPROPERTY(EditDefaultsOnly, Category = "Death")
+	FName BodyBoneName = TEXT("spine_03");
+
+	/** Velocity change (cm/s) given to the hit bone of the ragdoll along the killing shot. */
+	UPROPERTY(EditDefaultsOnly, Category = "Death", meta = (Units = "cm/s"))
+	float DeathImpulse = 320.f;
+
 	// --- Server-only --------------------------------------------------------------------
 
 	double LastNoiseTime = -1.0e9;
 	float LastNoiseRadius = 0.f;
 
+	UPROPERTY(Transient)
+	TObjectPtr<const UWeaponStats> LastDamageWeapon;
+
+	EHitZone LastDamageZone = EHitZone::None;
+	bool bLastDamageWallbang = false;
+
 	// --- Local-only ---------------------------------------------------------------------
 
 	FRotator ViewKick = FRotator::ZeroRotator;
 	FRotator ViewKickTarget = FRotator::ZeroRotator;
+
+	FViewmodelMotion ViewmodelMotion;
+	FViewmodelMotionSettings ViewmodelSettings;
+	FVector Mesh1PBaseLocation = FVector::ZeroVector;
+	FRotator Mesh1PBaseRotation = FRotator::ZeroRotator;
+	FRotator LastControlRotation = FRotator::ZeroRotator;
+	bool bHasLastControlRotation = false;
+	bool bTeamHighlightApplied = false;
 };

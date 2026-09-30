@@ -43,6 +43,7 @@ add_executable(TacticalSimulation
 	Tests/Test_Movement.cpp
 	Tests/Test_RoundsAndSpike.cpp
 	Tests/Test_CameraAim.cpp
+	Tests/Test_Presentation.cpp
 )
 
 target_include_directories(TacticalSimulation PRIVATE

@@ -63,6 +63,12 @@ public:
 	void StopFire();
 	void StartReload();
 
+	/** Owning client: current cone half-angle (degrees) the next shot would have. Drives the crosshair. */
+	float GetPredictedSpreadDegrees() const;
+
+	/** Owning client: ammo including shots still in flight to the server. */
+	int32 GetPredictedAmmo() const { return LocalPredictedAmmo; }
+
 	//~ AActor
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
@@ -96,7 +102,7 @@ protected:
 
 	bool FindExitPoint(const FHitResult& EntryHit, const FVector& Direction, float MaxThickness, FVector& OutExit) const;
 
-	void ApplyHitDamage(ATacticalCharacter* Victim, EHitZone Zone, float TravelledDistance, float PenetrationScale);
+	void ApplyHitDamage(ATacticalCharacter* Victim, EHitZone Zone, float TravelledDistance, float PenetrationScale, const FVector& ShotDirection);
 
 	bool ServerValidateFire(double ServerNow, double ViewTime, const FVector& Start) const;
 

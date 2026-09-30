@@ -172,6 +172,8 @@ struct FMath
 	static float Acos(float X) { return std::acos(Clamp(X, -1.f, 1.f)); }
 	static float Atan2(float Y, float X) { return std::atan2(Y, X); }
 	static float Exp(float X) { return std::exp(X); }
+	static float Tan(float X) { return std::tan(X); }
+	static int32 CeilToInt(float X) { return static_cast<int32>(std::ceil(X)); }
 	static float Fmod(float X, float Y) { return std::fmod(X, Y); }
 	static float DegreesToRadians(float Deg) { return Deg * (UE_PI / 180.f); }
 	static float RadiansToDegrees(float Rad) { return Rad * (180.f / UE_PI); }

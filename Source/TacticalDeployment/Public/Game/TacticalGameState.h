@@ -10,6 +10,7 @@
 
 class ULagCompensationComponent;
 class ASpikeBase;
+class UWeaponStats;
 
 /**
  * Everything clients need about the round, in one struct so a phase transition is one atomic
@@ -49,6 +50,29 @@ struct FTacticalRoundState
 	ETacticalRoundEndReason LastRoundEndReason = ETacticalRoundEndReason::None;
 };
 
+/** A kill as broadcast to every client (no positions: the feed cannot leak anything the fog hides). */
+USTRUCT()
+struct FKillFeedEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TObjectPtr<APlayerState> Killer;
+
+	UPROPERTY()
+	TObjectPtr<APlayerState> Victim;
+
+	/** Null for non-weapon deaths (spike detonation). */
+	UPROPERTY()
+	TObjectPtr<const UWeaponStats> Weapon;
+
+	UPROPERTY()
+	bool bHeadshot = false;
+
+	UPROPERTY()
+	bool bWallbang = false;
+};
+
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnMatchPhaseChanged, ETacticalMatchPhase /*Old*/, ETacticalMatchPhase /*New*/);
 
 /**
@@ -86,6 +110,24 @@ public:
 
 	FOnMatchPhaseChanged OnPhaseChanged;
 
+	/** Client-side kill feed, resolved to display strings on receipt (safe if a player leaves). */
+	struct FKillFeedLine
+	{
+		FString Killer;
+		FString Victim;
+		FString Weapon;
+		bool bKillerIsAlly = false;
+		bool bVictimIsAlly = false;
+		bool bHeadshot = false;
+		bool bWallbang = false;
+		double Time = 0.0;
+	};
+
+	const TArray<FKillFeedLine>& GetRecentKills() const { return RecentKills; }
+
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_KillFeed(const FKillFeedEntry& Entry);
+
 	// --- Server-only mutation (called by ATacticalGameMode) -------------------------------
 
 	void ServerSetPhase(ETacticalMatchPhase NewPhase, float Duration);
@@ -111,6 +153,8 @@ protected:
 
 	UPROPERTY(Replicated)
 	TObjectPtr<ASpikeBase> Spike;
+
+	TArray<FKillFeedLine> RecentKills;
 
 	/** Server only: 1000 ms hitbox history for server-side rewind. Not replicated. */
 	UPROPERTY(VisibleAnywhere, Category = "Components")

@@ -161,6 +161,19 @@ void ATacticalWeapon::StartReload()
 	Server_Reload();
 }
 
+float ATacticalWeapon::GetPredictedSpreadDegrees() const
+{
+	if (!Stats)
+	{
+		return 0.f;
+	}
+	// Preview the spray state at "now" without committing a shot.
+	FWeaponSprayState Preview = LocalSpray;
+	const ATacticalPlayerController* PC = OwnerCharacter ? OwnerCharacter->GetController<ATacticalPlayerController>() : nullptr;
+	Preview.Recover(PC ? PC->GetClientViewTime() : GetWorld()->GetTimeSeconds(), *Stats);
+	return Stats->ComputeSpread(BuildSpreadInputs(Preview.FiringError));
+}
+
 void ATacticalWeapon::LocalFireShot()
 {
 	const ATacticalGameState* GameState = GetWorld()->GetGameState<ATacticalGameState>();
@@ -188,6 +201,7 @@ void ATacticalWeapon::LocalFireShot()
 	--LocalPredictedAmmo;
 
 	OwnerCharacter->SetViewKickTarget(FRotator(Recoil.Y, Recoil.X, 0.f) * Stats->CameraKickFraction);
+	OwnerCharacter->AddViewmodelKick(Stats->ViewmodelKick);
 
 	FCollisionQueryParams CosmeticParams(SCENE_QUERY_STAT(WeaponCosmeticTrace), false, OwnerCharacter);
 	FHitResult CosmeticHit;
@@ -371,7 +385,7 @@ FVector ATacticalWeapon::TraceWithPenetration(const FScopedLagCompensation& Rewi
 	const FBulletResult Result = ShotRules::SolveBulletPath(Start, Direction, Stats->MaxRange, Stats->GetPenetrationParams(), TraceWorld, ProbeExit, TraceBodies);
 	if (Result.bHitBody)
 	{
-		ApplyHitDamage(LastBodyHit.Character, LastBodyHit.Zone, Result.TravelledDistance, Result.DamageScale);
+		ApplyHitDamage(LastBodyHit.Character, LastBodyHit.Zone, Result.TravelledDistance, Result.DamageScale, Direction);
 	}
 	return Result.ImpactPoint;
 }
@@ -399,7 +413,7 @@ bool ATacticalWeapon::FindExitPoint(const FHitResult& EntryHit, const FVector& D
 	return true;
 }
 
-void ATacticalWeapon::ApplyHitDamage(ATacticalCharacter* Victim, EHitZone Zone, float TravelledDistance, float PenetrationScale)
+void ATacticalWeapon::ApplyHitDamage(ATacticalCharacter* Victim, EHitZone Zone, float TravelledDistance, float PenetrationScale, const FVector& ShotDirection)
 {
 	if (!Victim)
 	{
@@ -410,7 +424,14 @@ void ATacticalWeapon::ApplyHitDamage(ATacticalCharacter* Victim, EHitZone Zone, 
 		* Stats->GetRangeMultiplier(TravelledDistance)
 		* PenetrationScale;
 
-	Victim->ApplyBulletDamage(FMath::RoundToFloat(Damage), Zone, Stats, OwnerCharacter->GetController(), this);
+	const bool bWallbang = PenetrationScale < 1.f;
+	const float Dealt = Victim->ApplyBulletDamage(FMath::RoundToFloat(Damage), Zone, Stats, OwnerCharacter->GetController(), this, ShotDirection, bWallbang);
+
+	// Hit confirmation goes to the shooter only (never to anyone else).
+	if (ATacticalPlayerController* ShooterPC = OwnerCharacter->GetController<ATacticalPlayerController>())
+	{
+		ShooterPC->Client_HitConfirmed(Zone, static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(Dealt), 0, 255)), !Victim->IsAlive(), bWallbang);
+	}
 }
 
 // ---------------------------------------------------------------------------------------

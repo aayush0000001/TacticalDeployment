@@ -46,6 +46,15 @@ void ATacticalPlayerController::Client_ReportTimeSync_Implementation(double Clie
 	ClockSync.AddSample(ClientSendTime, ServerTime, GetWorld()->GetTimeSeconds());
 }
 
+void ATacticalPlayerController::Client_HitConfirmed_Implementation(EHitZone Zone, uint8 Damage, bool bKilled, bool bWallbang)
+{
+	LastHit.Time = GetWorld()->GetTimeSeconds();
+	LastHit.Zone = Zone;
+	LastHit.Damage = Damage;
+	LastHit.bKill = bKilled;
+	LastHit.bWallbang = bWallbang;
+}
+
 double ATacticalPlayerController::GetEstimatedServerTime() const
 {
 	const double Now = GetWorld()->GetTimeSeconds();
